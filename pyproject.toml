@@ -1,0 +1,26 @@
+[project]
+name = "kado"
+version = "0.1.0"
+description = "Japanese Anki vocab card generator — look up, enrich, and sync cards straight to Anki"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+    "typer>=0.12",
+    "rich>=13.0",
+    "gtts>=2.5",
+    "genanki>=0.13",
+    "toml>=0.10",
+    "huggingface-hub>=0.23",
+    "InquirerPy>=0.3",
+    "pdfplumber>=0.11",
+    "pdf2image>=1.16",
+    "pytesseract>=0.3",
+]
+
+[project.scripts]
+kado = "kado.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
