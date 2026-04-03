@@ -11,7 +11,15 @@ from kado.config import KadoConfig
 from kado.models import VocabCard
 
 # Kado note model field definitions
-KADO_FIELDS = ["Word", "Reading", "Meaning", "PartOfSpeech", "ExampleJA", "ExampleEN", "Audio"]
+KADO_FIELDS = [
+    "Word",
+    "Reading",
+    "Meaning",
+    "PartOfSpeech",
+    "ExampleJA",
+    "ExampleEN",
+    "Audio",
+]
 
 CARD_FRONT_TEMPLATE = """
 <div class="card front">
@@ -213,7 +221,10 @@ class AnkiConnect:
         if card.audio_path and Path(card.audio_path).exists():
             filename = Path(card.audio_path).name
             fields["Audio"] = f"[sound:{filename}]"
-            self._invoke("updateNoteFields", note={"id": note_id, "fields": {"Audio": f"[sound:{filename}]"}})
+            self._invoke(
+                "updateNoteFields",
+                note={"id": note_id, "fields": {"Audio": f"[sound:{filename}]"}},
+            )
             self._invoke("storeMediaFile", filename=filename, path=str(card.audio_path))
 
         # Update tags

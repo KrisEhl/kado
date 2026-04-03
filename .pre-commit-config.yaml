@@ -1,0 +1,60 @@
+repos:
+    # ── Git hygiene & basic checks ────────────────────────────────────
+    - repo: https://github.com/pre-commit/pre-commit-hooks
+      rev: v6.0.0
+      hooks:
+        - id: end-of-file-fixer
+        - id: trailing-whitespace
+        - id: check-docstring-first
+        - id: detect-private-key
+        - id: check-ast
+        - id: check-added-large-files
+          args: [--maxkb, "1000"]
+        - id: check-merge-conflict
+        - id: check-yaml
+        - id: check-toml
+        - id: check-json
+        - id: debug-statements
+
+    # ── Secrets detection ─────────────────────────────────────────────
+    - repo: https://github.com/gitleaks/gitleaks
+      rev: v8.30.0
+      hooks:
+        - id: gitleaks
+
+    # ── Linting + formatting (replaces black, isort, flake8, autoflake) ──
+    - repo: https://github.com/astral-sh/ruff-pre-commit
+      rev: v0.15.5
+      hooks:
+        - id: ruff
+          args: [--fix]
+        - id: ruff-format
+
+    # ── Spell checking ────────────────────────────────────────────────
+    - repo: https://github.com/codespell-project/codespell
+      rev: v2.4.2
+      hooks:
+        - id: codespell
+          args: [--skip, "*.lock,*.ipynb", --ignore-words-list, "te,strat,AAs,infarction,ans,passt"]
+
+    # ── Notebook output stripping ─────────────────────────────────────
+    - repo: https://github.com/kynan/nbstripout
+      rev: 0.9.1
+      hooks:
+        - id: nbstripout
+
+    # # ── Type checking ─────────────────────────────────────────────────
+
+    # - repo: https://github.com/pre-commit/mirrors-mypy
+    #   rev: v1.19.1
+    #   hooks:
+    #     - id: mypy
+
+    # - repo: local
+    #   hooks:
+    #     - id: ty
+    #       name: ty type check
+    #       entry: ty check kego tests
+    #       language: system
+    #       pass_filenames: false
+    #       types: [python]

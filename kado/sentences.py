@@ -1,23 +1,78 @@
-"""Example sentence generation using open-source models via Hugging Face.
+"""Example sentence generation using open-source models.
 
-Uses HF's free serverless Inference API — no API key or token required.
+Supports two backends:
+  - "ollama"       (default) — local models via Ollama, no account needed
+  - "huggingface"  — HF's free serverless Inference API
+
 Generates natural Japanese example sentences that incorporate vocabulary
 the user has already studied, reinforcing retention.
 """
 
 from __future__ import annotations
 
+import json
+import os
 import random
-import sys
+import urllib.error
+import urllib.request
 
-# Models available on HF's free serverless inference (no token needed).
-# These are regularly updated — if one stops working, the next is tried.
-DEFAULT_MODELS = [
+from kado.debug import debug_print
+
+# HF models available on the free serverless inference (no token needed).
+HF_MODELS = [
     "Qwen/Qwen2.5-72B-Instruct",
     "meta-llama/Llama-3.3-70B-Instruct",
     "mistralai/Mistral-Small-24B-Instruct-2501",
     "HuggingFaceH4/zephyr-7b-beta",
 ]
+
+# Ollama models to try, largest first. Override with KADO_OLLAMA_MODEL env var.
+OLLAMA_MODELS = [
+    "qwen2.5:32b",
+    "qwen2.5:14b",
+    "qwen2.5:7b",
+    "gemma2:27b",
+    "gemma2:9b",
+    "llama3.1:8b",
+    "mistral:7b",
+]
+
+_DEFAULT_OLLAMA_URL = "http://localhost:11434"
+
+
+def resolve_model_name(
+    *,
+    provider: str = "ollama",
+    model: str | None = None,
+    ollama_url: str = "",
+) -> str:
+    """Resolve which model will be used, without generating anything.
+
+    Returns a human-readable model name like "qwen2.5:7b" or "Qwen/Qwen2.5-72B-Instruct".
+    Returns the provider name if no specific model can be determined yet.
+    """
+    if provider == "ollama":
+        base_url = ollama_url or os.environ.get("KADO_OLLAMA_URL", _DEFAULT_OLLAMA_URL)
+        override = model or os.environ.get("KADO_OLLAMA_MODEL", "")
+        models_to_try = [override] if override else OLLAMA_MODELS
+
+        available = _ollama_available_models(base_url)
+        if available is None:
+            return "ollama — not running, start with: ollama serve"
+
+        for m in models_to_try:
+            resolved = _resolve_ollama_model(m, available)
+            if resolved:
+                return resolved
+        recommended = models_to_try[2] if len(models_to_try) > 2 else models_to_try[0]
+        return f"ollama — no supported model, run: ollama pull {recommended}"
+
+    elif provider == "huggingface":
+        if model:
+            return model
+        return HF_MODELS[0] if HF_MODELS else "huggingface"
+
+    return provider
 
 
 def generate_example(
@@ -25,21 +80,21 @@ def generate_example(
     reading: str,
     meaning: str,
     known_vocab: list[str],
+    *,
+    provider: str = "ollama",
     model: str | None = None,
-) -> tuple[str, str]:
+    ollama_url: str = "",
+) -> tuple[str, str, str]:
     """Generate a Japanese example sentence + English translation.
 
-    Uses Hugging Face's free serverless Inference API with an open-source
-    model. No API key required.
+    Args:
+        provider: "ollama" (default) or "huggingface"
+        model: Pin a specific model name (overrides auto-selection)
+        ollama_url: Ollama base URL (default: http://localhost:11434)
 
-    The sentence tries to incorporate words from *known_vocab* so the
-    user practises previously-learnt vocabulary alongside the new word.
-
-    Returns (japanese_sentence, english_translation).
+    Returns (japanese_sentence, english_translation, model_used).
     Falls back to empty strings if generation fails.
     """
-    from huggingface_hub import InferenceClient
-
     context_words = _pick_context_words(known_vocab, max_words=5)
     context_hint = ""
     if context_words:
@@ -53,14 +108,174 @@ def generate_example(
         f"「{word}」 ({reading}, meaning: {meaning}).{context_hint}\n\n"
         f"Requirements:\n"
         f"- The sentence should be natural, everyday Japanese\n"
-        f"- Aim for JLPT N4-N3 grammar level\n"
+        f"- Aim for JLPT N4 grammar and vocabulary level\n"
         f"- Keep it under 30 characters\n"
         f"- Respond ONLY with two lines, nothing else:\n"
         f"Line 1: The Japanese sentence\n"
         f"Line 2: The English translation"
     )
 
-    models_to_try = [model] if model else DEFAULT_MODELS
+    if provider == "ollama":
+        result = _generate_via_ollama(prompt, model=model, ollama_url=ollama_url)
+        if result:
+            ja, en, model_used = result
+            return ja, en, model_used
+        _warn_ollama_missing(model=model, ollama_url=ollama_url)
+        return "", "", ""
+
+    elif provider == "huggingface":
+        result = _generate_via_hf(prompt, model=model)
+        if result:
+            ja, en, model_used = result
+            return ja, en, model_used
+        return "", "", ""
+
+    return "", "", ""
+
+
+# ── Ollama backend ─────────────────────────────────────────────────
+
+
+def _warn_ollama_missing(*, model: str | None = None, ollama_url: str = "") -> None:
+    """Print a user-friendly warning explaining why Ollama generation failed."""
+    import sys
+
+    base_url = ollama_url or os.environ.get("KADO_OLLAMA_URL", _DEFAULT_OLLAMA_URL)
+    available = _ollama_available_models(base_url)
+
+    if available is None:
+        print(
+            "   Ollama is not running. Start it with:\n"
+            "     ollama serve",
+            file=sys.stderr,
+        )
+        return
+
+    if model:
+        # User pinned a specific model
+        print(
+            f"   Model '{model}' is not installed. Install it with:\n"
+            f"     ollama pull {model}",
+            file=sys.stderr,
+        )
+        return
+
+    # No pinned model — show what we tried vs what's available
+    tried = OLLAMA_MODELS
+    installed = sorted(available)
+    recommended = tried[2] if len(tried) > 2 else tried[0]  # qwen2.5:7b
+
+    print(
+        f"   No compatible Ollama model found.\n"
+        f"   Installed: {', '.join(installed) if installed else '(none)'}\n"
+        f"   Supported: {', '.join(tried)}\n"
+        f"   Install one with:\n"
+        f"     ollama pull {recommended}",
+        file=sys.stderr,
+    )
+
+
+def _generate_via_ollama(
+    prompt: str,
+    *,
+    model: str | None = None,
+    ollama_url: str = "",
+) -> tuple[str, str, str] | None:
+    """Generate a sentence using a local Ollama model.
+
+    Returns (japanese, english, model_name) or None.
+    """
+    base_url = ollama_url or os.environ.get("KADO_OLLAMA_URL", _DEFAULT_OLLAMA_URL)
+    override = model or os.environ.get("KADO_OLLAMA_MODEL", "")
+
+    models_to_try = [override] if override else OLLAMA_MODELS
+
+    available = _ollama_available_models(base_url)
+    if available is None:
+        return None  # Ollama not running
+
+    for m in models_to_try:
+        resolved = _resolve_ollama_model(m, available)
+        if not resolved:
+            continue
+
+        try:
+            payload = json.dumps(
+                {
+                    "model": resolved,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": False,
+                    "options": {
+                        "num_predict": 200,
+                        "temperature": 0.7,
+                    },
+                }
+            ).encode()
+
+            req = urllib.request.Request(
+                f"{base_url}/api/chat",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = json.loads(resp.read())
+                text = data.get("message", {}).get("content", "").strip()
+                if text:
+                    ja, en = _parse_response(text)
+                    return ja, en, resolved
+        except Exception as e:
+            debug_print(f"Ollama {resolved}: {e}")
+            continue
+
+    return None
+
+
+def _ollama_available_models(base_url: str) -> set[str] | None:
+    """Return set of installed Ollama model names, or None if Ollama isn't running."""
+    try:
+        req = urllib.request.Request(f"{base_url}/api/tags", method="GET")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read())
+            return {m["name"] for m in data.get("models", [])}
+    except (urllib.error.URLError, OSError, json.JSONDecodeError):
+        return None
+
+
+def _resolve_ollama_model(requested: str, available: set[str]) -> str | None:
+    """Resolve a model name to an installed Ollama model.
+
+    Handles 'qwen2.5:7b' matching 'qwen2.5:latest', etc.
+    """
+    if not requested:
+        return None
+    if requested in available:
+        return requested
+    # Short-name match
+    short = requested.split(":")[0]
+    for name in available:
+        if name.split(":")[0] == short:
+            return name
+    return None
+
+
+# ── HuggingFace backend ────────────────────────────────────────────
+
+
+def _generate_via_hf(
+    prompt: str, *, model: str | None = None
+) -> tuple[str, str, str] | None:
+    """Generate a sentence using HF's free serverless Inference API.
+
+    Returns (japanese, english, model_name) or None.
+    """
+    try:
+        from huggingface_hub import InferenceClient
+    except ImportError:
+        debug_print("huggingface_hub not installed, run: pip install huggingface-hub")
+        return None
+
+    models_to_try = [model] if model else HF_MODELS
     last_error = None
 
     for m in models_to_try:
@@ -72,28 +287,29 @@ def generate_example(
                 temperature=0.7,
             )
             text = response.choices[0].message.content.strip()
-            return _parse_response(text)
+            ja, en = _parse_response(text)
+            return ja, en, m
         except Exception as e:
             last_error = f"{m}: {e}"
-            continue  # try next model
+            continue
 
-    # Print the last error to stderr so the user can see what went wrong
     if last_error:
-        print(f"  [debug] {last_error}", file=sys.stderr)
+        debug_print(f"HF: {last_error}")
+    return None
 
-    return "", ""
+
+# ── Shared helpers ─────────────────────────────────────────────────
 
 
 def _parse_response(text: str) -> tuple[str, str]:
     """Extract Japanese sentence and English translation from model output."""
-    lines = [l.strip() for l in text.strip().split("\n") if l.strip()]
+    lines = [line.strip() for line in text.strip().split("\n") if line.strip()]
 
-    # Strip common prefixes like "1.", "Line 1:", "Japanese:", etc.
     cleaned = []
     for line in lines:
         for prefix in ("1.", "2.", "Line 1:", "Line 2:", "Japanese:", "English:", "- "):
             if line.startswith(prefix):
-                line = line[len(prefix):].strip()
+                line = line[len(prefix) :].strip()
         cleaned.append(line)
 
     if len(cleaned) >= 2:

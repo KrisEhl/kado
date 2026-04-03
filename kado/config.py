@@ -25,8 +25,10 @@ class KadoConfig:
     anki_url: str = "http://localhost:8765"
     anki_deck: str = "Japanese::Vocabulary"
     anki_model: str = "Kado-Japanese"
-    sentence_provider: str = "huggingface"  # "huggingface" or "none"
+    sentence_provider: str = "ollama"  # "ollama", "huggingface", or "none"
     hf_model: str = ""  # empty = auto-select from defaults
+    ollama_url: str = "http://localhost:11434"
+    ollama_model: str = ""  # empty = auto-select from installed models
     audio_enabled: bool = True
     audio_lang: str = "ja"
 
@@ -44,6 +46,8 @@ class KadoConfig:
             sentences = data.get("sentences", {})
             cfg.sentence_provider = sentences.get("provider", cfg.sentence_provider)
             cfg.hf_model = sentences.get("hf_model", cfg.hf_model)
+            cfg.ollama_url = sentences.get("ollama_url", cfg.ollama_url)
+            cfg.ollama_model = sentences.get("ollama_model", cfg.ollama_model)
 
             audio = data.get("audio", {})
             cfg.audio_enabled = audio.get("enabled", cfg.audio_enabled)
@@ -65,6 +69,8 @@ class KadoConfig:
             "sentences": {
                 "provider": self.sentence_provider,
                 "hf_model": self.hf_model,
+                "ollama_url": self.ollama_url,
+                "ollama_model": self.ollama_model,
             },
             "audio": {
                 "enabled": self.audio_enabled,

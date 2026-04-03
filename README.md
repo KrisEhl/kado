@@ -202,13 +202,14 @@ uv run kado batch words.txt
 | `--no-llm-cleanup` | Skip LLM reconstruction from OCR text (import) |
 | `--pages / -p` | Select pages to import, e.g. `1-3,5,8` (import) |
 | `--debug` | Show detailed extraction breakdown per source (import) |
+| `--provider` | LLM provider: `ollama` (default, local) or `huggingface` (remote) |
 | `--dry-run` | Preview without adding to Anki |
 
 ## How example sentences work
 
-When you add a word, kado fetches your existing vocabulary from Anki and asks an open-source LLM (via Hugging Face's free serverless API) to write a natural example sentence that reuses words you've already studied. This creates reinforcement loops — every new card connects to things you know.
+When you add a word, kado fetches your existing vocabulary from Anki and asks an open-source LLM to write a natural example sentence that reuses words you've already studied. This creates reinforcement loops — every new card connects to things you know.
 
-The model auto-selects from locally running Ollama models first, falling back to Qwen, Llama, and Mistral variants on Hugging Face. You can pin a specific model in the config or via `KADO_OLLAMA_MODEL` env var.
+By default kado uses Ollama (local models). It auto-detects installed models and picks the best one. You can also switch to Hugging Face's free serverless API with `--provider huggingface` or by setting it in the config.
 
 ## Config
 
@@ -221,8 +222,10 @@ deck = "Japanese::Vocabulary"
 model = "Kado-Japanese"
 
 [sentences]
-provider = "huggingface"   # or "none" to disable
-hf_model = ""              # empty = auto-select
+provider = "ollama"        # "ollama" (default), "huggingface", or "none"
+ollama_url = "http://localhost:11434"
+ollama_model = ""          # empty = auto-select from installed models
+hf_model = ""              # empty = auto-select (only used when provider = "huggingface")
 
 [audio]
 enabled = true
@@ -240,7 +243,7 @@ kado/
 │   ├── dictionary.py       # Jisho API lookup
 │   ├── anki.py             # AnkiConnect integration
 │   ├── audio.py            # gTTS audio generation
-│   ├── sentences.py        # HF open-source LLM sentence generation
+│   ├── sentences.py        # LLM sentence generation (Ollama / HuggingFace)
 │   ├── pdf_import.py       # PDF vocab extraction (text + OCR)
 │   └── models.py           # VocabCard data model
 ```
