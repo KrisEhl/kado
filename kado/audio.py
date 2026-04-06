@@ -17,8 +17,8 @@ def generate_audio(word: str, lang: str = "ja") -> str:
 
     AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Deterministic filename based on word
-    slug = hashlib.md5(word.encode()).hexdigest()[:10]
+    # Deterministic filename based on word and language
+    slug = hashlib.md5(f"{lang}:{word}".encode()).hexdigest()
     filename = f"kado_{slug}.mp3"
     path = AUDIO_DIR / filename
 

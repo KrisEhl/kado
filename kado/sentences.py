@@ -13,10 +13,12 @@ from __future__ import annotations
 import json
 import os
 import random
+import sys
 import urllib.error
 import urllib.request
 
 from kado.debug import debug_print
+from kado.ollama_utils import OLLAMA_URL, ollama_available_models, ollama_resolve_model
 
 # HF models available on the free serverless inference (no token needed).
 HF_MODELS = [
@@ -37,8 +39,6 @@ OLLAMA_MODELS = [
     "mistral:7b",
 ]
 
-_DEFAULT_OLLAMA_URL = "http://localhost:11434"
-
 
 def resolve_model_name(
     *,
@@ -52,16 +52,16 @@ def resolve_model_name(
     Returns the provider name if no specific model can be determined yet.
     """
     if provider == "ollama":
-        base_url = ollama_url or os.environ.get("KADO_OLLAMA_URL", _DEFAULT_OLLAMA_URL)
+        base_url = ollama_url or os.environ.get("KADO_OLLAMA_URL", OLLAMA_URL)
         override = model or os.environ.get("KADO_OLLAMA_MODEL", "")
         models_to_try = [override] if override else OLLAMA_MODELS
 
-        available = _ollama_available_models(base_url)
+        available = ollama_available_models(base_url)
         if available is None:
             return "ollama — not running, start with: ollama serve"
 
         for m in models_to_try:
-            resolved = _resolve_ollama_model(m, available)
+            resolved = ollama_resolve_model(m, available)
             if resolved:
                 return resolved
         recommended = models_to_try[2] if len(models_to_try) > 2 else models_to_try[0]
@@ -138,15 +138,12 @@ def generate_example(
 
 def _warn_ollama_missing(*, model: str | None = None, ollama_url: str = "") -> None:
     """Print a user-friendly warning explaining why Ollama generation failed."""
-    import sys
-
-    base_url = ollama_url or os.environ.get("KADO_OLLAMA_URL", _DEFAULT_OLLAMA_URL)
-    available = _ollama_available_models(base_url)
+    base_url = ollama_url or os.environ.get("KADO_OLLAMA_URL", OLLAMA_URL)
+    available = ollama_available_models(base_url)
 
     if available is None:
         print(
-            "   Ollama is not running. Start it with:\n"
-            "     ollama serve",
+            "   Ollama is not running. Start it with:\n     ollama serve",
             file=sys.stderr,
         )
         return
@@ -185,17 +182,17 @@ def _generate_via_ollama(
 
     Returns (japanese, english, model_name) or None.
     """
-    base_url = ollama_url or os.environ.get("KADO_OLLAMA_URL", _DEFAULT_OLLAMA_URL)
+    base_url = ollama_url or os.environ.get("KADO_OLLAMA_URL", OLLAMA_URL)
     override = model or os.environ.get("KADO_OLLAMA_MODEL", "")
 
     models_to_try = [override] if override else OLLAMA_MODELS
 
-    available = _ollama_available_models(base_url)
+    available = ollama_available_models(base_url)
     if available is None:
         return None  # Ollama not running
 
     for m in models_to_try:
-        resolved = _resolve_ollama_model(m, available)
+        resolved = ollama_resolve_model(m, available)
         if not resolved:
             continue
 
@@ -224,38 +221,10 @@ def _generate_via_ollama(
                 if text:
                     ja, en = _parse_response(text)
                     return ja, en, resolved
-        except Exception as e:
+        except (urllib.error.URLError, OSError, json.JSONDecodeError, KeyError) as e:
             debug_print(f"Ollama {resolved}: {e}")
             continue
 
-    return None
-
-
-def _ollama_available_models(base_url: str) -> set[str] | None:
-    """Return set of installed Ollama model names, or None if Ollama isn't running."""
-    try:
-        req = urllib.request.Request(f"{base_url}/api/tags", method="GET")
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            data = json.loads(resp.read())
-            return {m["name"] for m in data.get("models", [])}
-    except (urllib.error.URLError, OSError, json.JSONDecodeError):
-        return None
-
-
-def _resolve_ollama_model(requested: str, available: set[str]) -> str | None:
-    """Resolve a model name to an installed Ollama model.
-
-    Handles 'qwen2.5:7b' matching 'qwen2.5:latest', etc.
-    """
-    if not requested:
-        return None
-    if requested in available:
-        return requested
-    # Short-name match
-    short = requested.split(":")[0]
-    for name in available:
-        if name.split(":")[0] == short:
-            return name
     return None
 
 
@@ -289,7 +258,7 @@ def _generate_via_hf(
             text = response.choices[0].message.content.strip()
             ja, en = _parse_response(text)
             return ja, en, m
-        except Exception as e:
+        except (OSError, KeyError, IndexError, ValueError) as e:
             last_error = f"{m}: {e}"
             continue
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import socket
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -20,8 +22,15 @@ def lookup(word: str) -> VocabCard:
     url = f"{JISHO_API}?{params}"
 
     req = urllib.request.Request(url, headers={"User-Agent": "kado/0.1"})
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        body = json.loads(resp.read().decode())
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = json.loads(resp.read().decode())
+    except urllib.error.URLError as e:
+        raise ConnectionError(
+            f"Could not reach Jisho (network error): {e.reason}"
+        ) from e
+    except socket.timeout as e:
+        raise ConnectionError("Could not reach Jisho (request timed out)") from e
 
     data = body.get("data", [])
     if not data:
@@ -51,12 +60,8 @@ def lookup(word: str) -> VocabCard:
     pos_str = ", ".join(pos_parts) if pos_parts else ""
 
     # Collect tags (JLPT level, common word, etc.)
-    tags: list[str] = []
-    for tag in entry.get("tags", []):
-        tags.append(tag)
-    jlpt = entry.get("jlpt", [])
-    if jlpt:
-        tags.extend(jlpt)
+    tags: list[str] = list(entry.get("tags", []))
+    tags.extend(entry.get("jlpt", []))
     if entry.get("is_common"):
         tags.append("common")
 
