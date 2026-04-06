@@ -8,11 +8,25 @@ Supports both text-based and scanned/image PDFs.
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import sys
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 
 from kado.models import VocabCard
 from kado.debug import debug_print
+from kado.ollama_utils import (
+    OLLAMA_URL,
+    OLLAMA_VISION_MODELS,
+    ollama_available_models,
+    ollama_resolve_model,
+)
+
+# Na-adjective endings that should NOT be canonicalized to word(な)
+_NA_ADJ_EXCEPTIONS = frozenset({"みんな", "こんな", "そんな", "あんな", "どんな"})
 
 
 def parse_vocab_pdf(
@@ -23,6 +37,7 @@ def parse_vocab_pdf(
     provider: str = "ollama",
     ollama_url: str = "",
     ollama_model: str = "",
+    ollama_vision_model: str = "",
 ) -> list[VocabCard]:
     """Extract vocabulary cards from a PDF file.
 
@@ -32,7 +47,8 @@ def parse_vocab_pdf(
     Args:
         provider: "ollama" (default) or "huggingface" — which LLM backend for cleanup/reconstruction
         ollama_url: Override Ollama base URL
-        ollama_model: Pin a specific Ollama model
+        ollama_model: Pin a specific Ollama model for LLM cleanup
+        ollama_vision_model: Pin a specific Ollama model for vision extraction
     """
     cards = _extract_from_text(path, pages=pages)
     if cards:
@@ -47,6 +63,7 @@ def parse_vocab_pdf(
         provider=provider,
         ollama_url=ollama_url,
         ollama_model=ollama_model,
+        ollama_vision_model=ollama_vision_model,
     )
 
 
@@ -58,6 +75,7 @@ def _extract_scanned(
     provider: str = "ollama",
     ollama_url: str = "",
     ollama_model: str = "",
+    ollama_vision_model: str = "",
 ) -> list[VocabCard]:
     """Run all available extraction methods on a scanned PDF and merge results.
 
@@ -75,13 +93,21 @@ def _extract_scanned(
     llm_cards: list[VocabCard] = []
     ocr_cards: list[VocabCard] = []
 
-    # 1. OCR column parsing (always runs — it's local and fast-ish)
+    # 1. Vision model first — runs before LLM so the vision model loads into VRAM
+    # without having to evict the text model first (Ollama loads one model at a time)
+    if use_vision:
+        vision_cards = _extract_via_vision(
+            path, pages=pages, provider=provider, ollama_url=ollama_url,
+            ollama_vision_model=ollama_vision_model,
+        )
+
+    # 2. OCR column parsing (always runs — it's local and fast-ish)
     try:
         ocr_cards = _extract_via_ocr_columns(path, pages=pages)
     except RuntimeError as e:
         debug_print(f"OCR unavailable: {e}")
 
-    # 2. LLM reconstruction from raw OCR text
+    # 3. LLM reconstruction from raw OCR text
     if llm_cleanup and ocr_cards is not None:
         try:
             page_dumps = _get_raw_ocr_pages(path, pages=pages)
@@ -93,12 +119,6 @@ def _extract_scanned(
             )
         except RuntimeError:
             pass  # tesseract not available
-
-    # 3. Vision model
-    if use_vision:
-        vision_cards = _extract_via_vision(
-            path, pages=pages, provider=provider, ollama_url=ollama_url
-        )
 
     # Merge: vision > llm > ocr
     return _merge_sources(
@@ -138,10 +158,10 @@ def _merge_sources(
         )
 
     # Normalize words for matching (full-width ↔ half-width brackets, する/な forms)
-    ocr_norm = {_normalize_word(c.word) for c in ocr_cards}
+    ocr_norm = {_dedup_key(c.word) for c in ocr_cards}
 
     merged: list[VocabCard] = []
-    seen: set[str] = set()  # normalized forms
+    seen: set[str] = set()  # dedup keys (base forms, する/な stripped)
 
     # Pass 1: vision cards — best quality, normalize word to canonical form
     for card in vision_cards:
@@ -149,10 +169,11 @@ def _merge_sources(
             continue
         card.word = _normalize_word(card.word)
         card.reading = card.reading.replace("（", "(").replace("）", ")")
-        if card.word in seen:
+        key = _dedup_key(card.word)
+        if key in seen:
             continue
         card.source = "vision"
-        seen.add(card.word)
+        seen.add(key)
         merged.append(card)
 
     # Pass 2: LLM cards — clean English meanings
@@ -160,11 +181,12 @@ def _merge_sources(
         if not card.word:
             continue
         norm = _normalize_word(card.word)
-        if norm in seen:
+        key = _dedup_key(norm)
+        if key in seen:
             continue
         card.word = norm
-        card.source = "ocr" if norm in ocr_norm else "llm"
-        seen.add(norm)
+        card.source = "ocr" if key in ocr_norm else "llm"
+        seen.add(key)
         merged.append(card)
 
     # Pass 3: OCR-only cards — clean up with LLM before including
@@ -172,8 +194,8 @@ def _merge_sources(
     for card in ocr_cards:
         if not card.word:
             continue
-        norm = _normalize_word(card.word)
-        if norm in seen:
+        key = _dedup_key(card.word)
+        if key in seen:
             continue
         ocr_leftovers.append(card)
 
@@ -185,9 +207,9 @@ def _merge_sources(
             ollama_model=ollama_model,
         )
         for card in cleaned:
-            norm = _normalize_word(card.word)
-            if norm not in seen:
-                seen.add(norm)
+            key = _dedup_key(card.word)
+            if key not in seen:
+                seen.add(key)
                 merged.append(card)
 
     return merged
@@ -200,8 +222,6 @@ def _llm_fix_ocr_cards(
     ollama_model: str = "",
 ) -> list[VocabCard]:
     """Quick LLM pass to fix OCR-only cards: correct kanji and translate German → English."""
-    import json
-
     entries = []
     for i, c in enumerate(cards):
         entries.append(
@@ -254,8 +274,6 @@ def _llm_fix_ocr_cards(
     except (json.JSONDecodeError, KeyError):
         return cards
 
-    return cards  # return originals if LLM unavailable
-
 
 def _llm_translate_vision_cards(
     cards: list[VocabCard],
@@ -264,8 +282,6 @@ def _llm_translate_vision_cards(
     ollama_model: str = "",
 ) -> list[VocabCard]:
     """Translate German meanings from vision cards to English via LLM."""
-    import json
-
     if not cards:
         return cards
 
@@ -350,7 +366,7 @@ def _extract_from_text(path: str, pages: set[int] | None = None) -> list[VocabCa
             if pages and page_num not in pages:
                 continue
             if not page.chars:
-                return []
+                continue
             tables = page.extract_tables()
             for table in tables:
                 if not table:
@@ -420,6 +436,7 @@ def _extract_via_vision(
     pages: set[int] | None = None,
     provider: str = "ollama",
     ollama_url: str = "",
+    ollama_vision_model: str = "",
 ) -> list[VocabCard]:
     """Use an HF vision model to extract vocab from scanned PDF pages.
 
@@ -439,7 +456,7 @@ def _extract_via_vision(
     except ImportError:
         return []
 
-    images = convert_from_path(path, dpi=200)
+    images = convert_from_path(path, dpi=150)
     all_cards: list[VocabCard] = []
     seen: set[str] = set()
 
@@ -464,29 +481,24 @@ def _extract_via_vision(
     ]
 
     # Ollama vision models to try
-    import os
-
-    ollama_vision_model = os.environ.get("KADO_OLLAMA_VISION_MODEL", "")
-    ollama_vision_models = (
-        [ollama_vision_model]
-        if ollama_vision_model
-        else [
-            "llama3.2-vision:90b",
-            "llama3.2-vision:11b",
-            "llava:34b",
-            "llava:13b",
-            "llava:7b",
-            "minicpm-v",
-        ]
+    ollama_vision_model = (
+        ollama_vision_model
+        or os.environ.get("KADO_OLLAMA_VISION_MODEL", "")
     )
+    ollama_vision_models = [ollama_vision_model] if ollama_vision_model else OLLAMA_VISION_MODELS
 
     for page_num, image in enumerate(images, 1):
         if pages and page_num not in pages:
             continue
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-            image.save(tmp.name, "PNG")
-            with open(tmp.name, "rb") as f:
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            tmp_name = tmp.name
+            image.save(tmp_name, "JPEG", quality=85)
+        try:
+            with open(tmp_name, "rb") as f:
                 b64 = base64.b64encode(f.read()).decode()
+        finally:
+            os.unlink(tmp_name)
+        debug_print(f"Vision image: {len(b64) // 1024}KB base64")
 
         # Try Ollama vision first
         page_cards = _try_ollama_vision(b64, prompt, ollama_vision_models, ollama_url)
@@ -529,63 +541,24 @@ def _extract_via_vision(
                             seen.add(card.word)
                             all_cards.append(card)
                     break  # success, move to next page
-                except Exception:
+                except (OSError, KeyError, IndexError, ValueError):
                     continue
 
     return all_cards
-
-
-def _ollama_available_models(base_url: str) -> set[str] | None:
-    """Return set of installed Ollama model names, or None if Ollama isn't running."""
-    import json
-    import urllib.request
-    import urllib.error
-
-    try:
-        req = urllib.request.Request(f"{base_url}/api/tags", method="GET")
-        with urllib.request.urlopen(req, timeout=2) as resp:
-            data = json.loads(resp.read())
-            return {m["name"] for m in data.get("models", [])}
-    except (urllib.error.URLError, OSError, json.JSONDecodeError):
-        return None
-
-
-def _resolve_ollama_model(requested: str, available_names: set[str]) -> str | None:
-    """Resolve a requested model name to an actually installed Ollama model.
-
-    Handles cases like requesting 'llava:13b' when 'llava:latest' is installed —
-    returns the actual installed name so the API call succeeds.
-    """
-    if not requested:
-        return None
-    # Exact match
-    if requested in available_names:
-        return requested
-    # Short-name match: 'llava' matches 'llava:latest', 'qwen2.5' matches 'qwen2.5:7b'
-    requested_short = requested.split(":")[0]
-    for name in available_names:
-        if name.split(":")[0] == requested_short:
-            return name
-    return None
 
 
 def _try_ollama_vision(
     b64_image: str, prompt: str, models: list[str], ollama_url: str = ""
 ) -> list[VocabCard]:
     """Try to extract vocab from an image using Ollama's vision API."""
-    import json
-    import os
-    import urllib.request
-    import urllib.error
+    base_url = ollama_url or os.environ.get("KADO_OLLAMA_URL", OLLAMA_URL)
 
-    base_url = ollama_url or os.environ.get("KADO_OLLAMA_URL", _OLLAMA_URL)
-
-    available_names = _ollama_available_models(base_url)
+    available_names = ollama_available_models(base_url)
     if available_names is None:
         return []
 
     for model in models:
-        resolved = _resolve_ollama_model(model, available_names)
+        resolved = ollama_resolve_model(model, available_names)
         if not resolved:
             continue
 
@@ -602,7 +575,8 @@ def _try_ollama_vision(
                     ],
                     "stream": False,
                     "options": {
-                        "num_predict": 4000,
+                        "num_ctx": 8192,
+                        "num_predict": 2048,
                         "temperature": 0.1,
                     },
                 }
@@ -614,13 +588,17 @@ def _try_ollama_vision(
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=180) as resp:
+            with urllib.request.urlopen(req, timeout=600) as resp:
                 data = json.loads(resp.read())
                 text = data.get("message", {}).get("content", "").strip()
                 if text:
                     debug_print(f"Ollama vision ({resolved}): OK")
                     return _parse_llm_json(text)
-        except Exception as e:
+        except urllib.error.HTTPError as e:
+            body = e.read().decode(errors="replace")[:500]
+            debug_print(f"Ollama vision {resolved}: HTTP {e.code} — {body}")
+            continue
+        except (urllib.error.URLError, OSError, json.JSONDecodeError, KeyError) as e:
             debug_print(f"Ollama vision {resolved}: {e}")
             continue
 
@@ -652,8 +630,6 @@ def _is_table_noise(word: str) -> bool:
 
 
 def _parse_llm_json(text: str) -> list[VocabCard]:
-    import json
-
     match = re.search(r"\[.*\]", text, re.DOTALL)
     if not match:
         return []
@@ -694,8 +670,6 @@ _OLLAMA_MODELS = [
     "mistral:7b",
 ]
 
-_OLLAMA_URL = "http://localhost:11434"
-
 
 def _llm_chat(
     prompt: str,
@@ -732,7 +706,9 @@ def _llm_chat(
         try:
             from huggingface_hub import InferenceClient
         except ImportError:
-            debug_print("huggingface_hub not installed, run: pip install huggingface-hub")
+            debug_print(
+                "huggingface_hub not installed, run: pip install huggingface-hub"
+            )
             return None
 
         for model in _CLEANUP_MODELS:
@@ -744,7 +720,7 @@ def _llm_chat(
                     temperature=temperature,
                 )
                 return response.choices[0].message.content.strip()
-            except Exception as e:
+            except (OSError, KeyError, IndexError, ValueError) as e:
                 debug_print(f"HF model {model}: {e}")
                 continue
         return None
@@ -754,16 +730,12 @@ def _llm_chat(
 
 def _warn_ollama_missing(*, ollama_url: str = "", ollama_model: str = "") -> None:
     """Print a user-friendly warning explaining why Ollama failed."""
-    import os
-    import sys
-
-    base_url = ollama_url or os.environ.get("KADO_OLLAMA_URL", _OLLAMA_URL)
-    available = _ollama_available_models(base_url)
+    base_url = ollama_url or os.environ.get("KADO_OLLAMA_URL", OLLAMA_URL)
+    available = ollama_available_models(base_url)
 
     if available is None:
         print(
-            "   Ollama is not running. Start it with:\n"
-            "     ollama serve",
+            "   Ollama is not running. Start it with:\n     ollama serve",
             file=sys.stderr,
         )
         return
@@ -798,22 +770,17 @@ def _try_ollama(
     ollama_model: str = "",
 ) -> str | None:
     """Try to get a response from a local Ollama instance."""
-    import json
-    import os
-    import urllib.request
-    import urllib.error
-
-    base_url = ollama_url or os.environ.get("KADO_OLLAMA_URL", _OLLAMA_URL)
+    base_url = ollama_url or os.environ.get("KADO_OLLAMA_URL", OLLAMA_URL)
     override_model = ollama_model or os.environ.get("KADO_OLLAMA_MODEL", "")
 
     models_to_try = [override_model] if override_model else _OLLAMA_MODELS
 
-    available_names = _ollama_available_models(base_url)
+    available_names = ollama_available_models(base_url)
     if available_names is None:
         return None  # Ollama not running
 
     for model in models_to_try:
-        resolved = _resolve_ollama_model(model, available_names)
+        resolved = ollama_resolve_model(model, available_names)
         if not resolved:
             continue
 
@@ -842,16 +809,11 @@ def _try_ollama(
                 if text:
                     debug_print(f"Ollama ({resolved}): OK")
                     return text
-        except Exception as e:
+        except (urllib.error.URLError, OSError, json.JSONDecodeError, KeyError) as e:
             debug_print(f"Ollama model {resolved}: {e}")
             continue
 
     return None
-
-
-def _llm_cleanup_cards(cards: list[VocabCard]) -> list[VocabCard]:
-    """Kept for compatibility — delegates to _llm_reconstruct_from_ocr."""
-    return cards  # no-op now, reconstruction happens in _extract_via_ocr
 
 
 def _llm_reconstruct_from_ocr(
@@ -869,7 +831,9 @@ def _llm_reconstruct_from_ocr(
     all_cards: list[VocabCard] = []
     seen: set[str] = set()
 
-    debug_print(f"Reconstructing vocab from OCR text with LLM ({len(page_dumps)} pages)...")
+    debug_print(
+        f"Reconstructing vocab from OCR text with LLM ({len(page_dumps)} pages)..."
+    )
 
     for page_num, raw_text in enumerate(page_dumps, 1):
         if not raw_text.strip():
@@ -989,10 +953,6 @@ class _OcrWord:
     height: int
 
     @property
-    def right(self) -> int:
-        return self.left + self.width
-
-    @property
     def center_x(self) -> int:
         return self.left + self.width // 2
 
@@ -1069,7 +1029,7 @@ def _ensure_ocr_deps() -> None:
         )
     try:
         pytesseract.get_tesseract_version()
-    except Exception:
+    except (OSError, EnvironmentError):
         raise RuntimeError(
             "tesseract not found. Install it:\n"
             "  macOS:  brew install tesseract tesseract-lang\n"
@@ -1103,7 +1063,7 @@ def _extract_via_ocr_columns(
             continue
 
         rows = _group_into_rows(ocr_words, tolerance=35)
-        col_bounds = _detect_column_bounds(ocr_words, image.width)
+        col_bounds = _jbridge_column_bounds(ocr_words, image.width)
 
         partials = []
         for row_words in rows:
@@ -1167,14 +1127,14 @@ def _group_into_rows(
     return rows
 
 
-def _detect_column_bounds(
+def _jbridge_column_bounds(
     words: list[_OcrWord], page_width: int
 ) -> dict[str, tuple[int, int]]:
     """J.Bridge table column boundaries as page-width ratios."""
     return {
         "word": (int(page_width * 0.28), int(page_width * 0.48)),
         "reading": (int(page_width * 0.48), int(page_width * 0.66)),
-        "meaning": (int(page_width * 0.65), int(page_width * 0.95)),
+        "meaning": (int(page_width * 0.66), int(page_width * 0.95)),
     }
 
 
@@ -1214,11 +1174,6 @@ def _merge_partial_rows(partials: list[_PartialRow]) -> list[_PartialRow]:
 
         current.merge(p)
 
-        # If we have all three fields, flush
-        if current.word and current.meaning:
-            # But peek ahead — next row might have more meaning text
-            pass
-
     if not current.is_empty():
         merged.append(current)
 
@@ -1235,6 +1190,7 @@ def dump_ocr_debug(
     provider: str = "ollama",
     ollama_url: str = "",
     ollama_model: str = "",
+    ollama_vision_model: str = "",
 ) -> list[VocabCard]:
     """Full debug: raw OCR → column parsing → LLM reconstruction."""
     import pytesseract
@@ -1263,7 +1219,7 @@ def dump_ocr_debug(
         )
         ocr_words = _build_ocr_words(data)
         rows = _group_into_rows(ocr_words, tolerance=35)
-        col_bounds = _detect_column_bounds(ocr_words, image.width)
+        col_bounds = _jbridge_column_bounds(ocr_words, image.width)
 
         print(f"\nColumn bounds (page width={image.width}):")
         for name, (start, end) in col_bounds.items():
@@ -1279,7 +1235,7 @@ def dump_ocr_debug(
             card = p.to_card()
             status = "✓" if card else "·"
             if card:
-                col_parsed_words.add(_normalize_word(card.word))
+                col_parsed_words.add(_dedup_key(card.word))
                 if card.word not in ocr_seen:
                     card.source = "ocr"
                     ocr_seen.add(card.word)
@@ -1295,35 +1251,8 @@ def dump_ocr_debug(
             lines.append(line)
         page_dumps.append("\n".join(lines))
 
-    # ── Phase 2: LLM reconstruction ──
-    print(f"\n{'=' * 60}")
-    print("LLM RECONSTRUCTION")
-    print(f"{'=' * 60}")
-
-    llm_cards = (
-        _llm_reconstruct_from_ocr(
-            page_dumps,
-            provider=provider,
-            ollama_url=ollama_url,
-            ollama_model=ollama_model,
-        )
-        or []
-    )
-    llm_words = {_normalize_word(c.word) for c in llm_cards}
-
-    if llm_cards:
-        print(f"\nLLM reconstructed {len(llm_cards)} entries:")
-        print(f"{'-' * 60}")
-        for i, c in enumerate(llm_cards):
-            norm = _normalize_word(c.word)
-            tag = "ocr+llm" if norm in col_parsed_words else "llm"
-            print(
-                f"  ✓ {i:2d} [{tag:7s}]: word=[{c.word:20s}] reading=[{c.reading:15s}] meaning=[{c.meaning[:35]:35s}]"
-            )
-    else:
-        print("\n  (no results — LLM models may be busy, try again)")
-
-    # ── Phase 3: Vision model ──
+    # ── Phase 2: Vision model (runs before LLM so the large vision model loads
+    # into VRAM before the text model, avoiding a costly model swap) ──
     vision_cards: list[VocabCard] = []
     vision_words: set[str] = set()
 
@@ -1338,27 +1267,56 @@ def dump_ocr_debug(
                 pages=pages,
                 provider=provider,
                 ollama_url=ollama_url,
+                ollama_vision_model=ollama_vision_model,
             )
             or []
         )
-        vision_words = {_normalize_word(c.word) for c in vision_cards}
+        vision_words = {_dedup_key(c.word) for c in vision_cards}
 
         if vision_cards:
             print(f"\nVision extracted {len(vision_cards)} entries:")
             print(f"{'-' * 60}")
             for i, c in enumerate(vision_cards):
-                norm = _normalize_word(c.word)
-                tags = []
-                if norm in col_parsed_words:
-                    tags.append("ocr")
-                if norm in llm_words:
-                    tags.append("llm")
-                tag = "+".join(tags) if tags else "vision"
+                key = _dedup_key(c.word)
+                tag = "ocr" if key in col_parsed_words else "vision"
                 print(
                     f"  ✓ {i:2d} [{tag:12s}]: word=[{c.word:20s}] reading=[{c.reading:15s}] meaning=[{c.meaning[:35]:35s}]"
                 )
         else:
-            print("\n  (no results — run `huggingface-cli login` for vision support)")
+            print("\n  (no results — vision model may still be loading, or pull a vision model with: ollama pull qwen2.5vl:7b)")
+
+    # ── Phase 3: LLM reconstruction ──
+    print(f"\n{'=' * 60}")
+    print("LLM RECONSTRUCTION")
+    print(f"{'=' * 60}")
+
+    llm_cards = (
+        _llm_reconstruct_from_ocr(
+            page_dumps,
+            provider=provider,
+            ollama_url=ollama_url,
+            ollama_model=ollama_model,
+        )
+        or []
+    )
+    llm_words = {_dedup_key(c.word) for c in llm_cards}
+
+    if llm_cards:
+        print(f"\nLLM reconstructed {len(llm_cards)} entries:")
+        print(f"{'-' * 60}")
+        for i, c in enumerate(llm_cards):
+            key = _dedup_key(c.word)
+            tags = []
+            if key in col_parsed_words:
+                tags.append("ocr")
+            if key in vision_words:
+                tags.append("vision")
+            tag = "+".join(tags) if tags else "llm"
+            print(
+                f"  ✓ {i:2d} [{tag:7s}]: word=[{c.word:20s}] reading=[{c.reading:15s}] meaning=[{c.meaning[:35]:35s}]"
+            )
+    else:
+        print("\n  (no results — LLM models may be busy, try again)")
 
     # ── Summary ──
     all_words = col_parsed_words | llm_words | vision_words
@@ -1396,18 +1354,20 @@ def dump_ocr_debug(
     # Show words unique to each source (key by normalized form)
     if vision_only:
         print("\n  Vision-only words:")
-        vision_by_norm = {_normalize_word(c.word): c for c in vision_cards}
+        vision_by_norm = {_dedup_key(c.word): c for c in vision_cards}
         for w in sorted(vision_only):
-            c = vision_by_norm.get(w)
-            if c:
+            c_v: VocabCard | None = vision_by_norm.get(w)
+            if c_v:
+                c = c_v
                 print(f"    + {c.word} 【{c.reading}】 — {c.meaning[:50]}")
 
     if llm_only:
         print("\n  LLM-only words (from German):")
-        llm_by_norm = {_normalize_word(c.word): c for c in llm_cards}
+        llm_by_norm = {_dedup_key(c.word): c for c in llm_cards}
         for w in sorted(llm_only):
-            c = llm_by_norm.get(w)
-            if c:
+            c_l: VocabCard | None = llm_by_norm.get(w)
+            if c_l:
+                c = c_l
                 print(f"    + {c.word} 【{c.reading}】 — {c.meaning[:50]}")
 
     if ocr_only:
@@ -1463,6 +1423,20 @@ def _clean_ocr_meaning(text: str) -> str:
     return text
 
 
+def _dedup_key(text: str) -> str:
+    """Return a base form used only for deduplication.
+
+    Strips (する)/(な) suffixes so that 発展 and 発展(する) are treated as the same
+    word regardless of which source found them.
+    """
+    norm = _normalize_word(text)
+    if norm.endswith("(する)"):
+        norm = norm[: -len("(する)")]
+    if norm.endswith("(な)"):
+        norm = norm[: -len("(な)")]
+    return norm
+
+
 def _normalize_word(text: str) -> str:
     """Normalize a word for matching: full-width brackets → half-width, strip spaces.
 
@@ -1477,8 +1451,16 @@ def _normalize_word(text: str) -> str:
     # Canonicalize する verbs: 発展する → 発展(する) if not already bracketed
     if text.endswith("する") and not text.endswith("(する)"):
         text = text[:-2] + "(する)"
-    # Canonicalize な adjectives: 静かな → 静か(な) if not already bracketed
-    if text.endswith("な") and not text.endswith("(な)"):
+    # Canonicalize な adjectives: 静かな → 静か(な) if not already bracketed.
+    # Only apply when the character before な is a CJK ideograph — this avoids
+    # corrupting words like みんな, 奈良, etc. that happen to end in な.
+    if (
+        text.endswith("な")
+        and not text.endswith("(な)")
+        and text not in _NA_ADJ_EXCEPTIONS
+        and len(text) >= 2
+        and "\u4e00" <= text[-2] <= "\u9fff"
+    ):
         text = text[:-1] + "(な)"
     return text
 

@@ -9,23 +9,25 @@ Usage:
 
 from __future__ import annotations
 
-import sys
+import logging
 
-_debug_enabled = False
+_logger = logging.getLogger("kado")
 
 
 def set_debug(enabled: bool) -> None:
     """Enable or disable debug output globally."""
-    global _debug_enabled
-    _debug_enabled = enabled
+    if enabled:
+        logging.basicConfig(level=logging.DEBUG)
+        _logger.setLevel(logging.DEBUG)
+    else:
+        _logger.setLevel(logging.WARNING)
 
 
 def is_debug() -> bool:
     """Check if debug mode is on."""
-    return _debug_enabled
+    return _logger.isEnabledFor(logging.DEBUG)
 
 
 def debug_print(msg: str) -> None:
-    """Print a debug message to stderr if debug mode is enabled."""
-    if _debug_enabled:
-        print(f"  [debug] {msg}", file=sys.stderr)
+    """Print a debug message if debug mode is enabled."""
+    _logger.debug(msg)

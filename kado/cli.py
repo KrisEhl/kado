@@ -2,14 +2,27 @@
 
 from __future__ import annotations
 
+import os
+from collections import Counter
+from pathlib import Path
 from typing import Optional
 
 import typer
 from rich import print as rprint
+from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from kado.config import KadoConfig
+from kado.config import CONFIG_PATH, KadoConfig
+from kado.debug import set_debug
+
+# Source labels for the PDF import preview table
+_SOURCE_LABELS: dict[str, tuple[str, str]] = {
+    "text": ("[green]text[/green]", "extracted from PDF text layer"),
+    "vision": ("[blue]vision[/blue]", "extracted by HF vision model"),
+    "ocr": ("[green]ocr[/green]", "found by OCR, cleaned by LLM"),
+    "llm": ("[yellow]llm[/yellow]", "reconstructed from German via LLM"),
+}
 
 app = typer.Typer(
     name="kado",
@@ -38,12 +51,13 @@ def add(
     provider: Optional[str] = typer.Option(
         None, "--provider", help="LLM provider: ollama (default) or huggingface"
     ),
-    debug: bool = typer.Option(False, "--debug", help="Show detailed LLM/OCR debug logs"),
+    debug: bool = typer.Option(
+        False, "--debug", help="Show detailed LLM/OCR debug logs"
+    ),
 ):
     """Look up a word, generate audio + example sentence, and add to Anki."""
     from kado.anki import AnkiConnect, AnkiConnectError
     from kado.audio import generate_audio
-    from kado.debug import set_debug
     from kado.dictionary import lookup
     from kado.sentences import generate_example, resolve_model_name
 
@@ -67,8 +81,6 @@ def add(
 
     # 3. Example sentence
     if not no_sentence and active_provider != "none":
-        from rich.console import Console
-
         console = Console()
         known_vocab: list[str] = []
         if not dry_run:
@@ -90,7 +102,9 @@ def add(
             model=model_arg,
             ollama_url=cfg.ollama_url,
         )
-        with console.status(f"[bold]💬 Generating example sentence ({resolved_name})...[/bold]"):
+        with console.status(
+            f"[bold]💬 Generating example sentence ({resolved_name})...[/bold]"
+        ):
             ja, en, model_used = generate_example(
                 word=card.word,
                 reading=card.reading,
@@ -112,10 +126,7 @@ def add(
 
     # 4. Audio
     if not no_audio and cfg.audio_enabled:
-        from rich.console import Console
-
-        console = Console()
-        with console.status("[bold]🔊 Generating audio (gTTS)...[/bold]"):
+        with Console().status("[bold]🔊 Generating audio (gTTS)...[/bold]"):
             try:
                 card.audio_path = generate_audio(card.word, lang=cfg.audio_lang)
             except Exception as e:
@@ -132,21 +143,23 @@ def add(
         rprint("[dim]Dry run — card was not added to Anki.[/dim]")
         return
 
-    rprint(f"[bold]📤 Syncing to Anki deck [cyan]{cfg.anki_deck}[/cyan] (AnkiConnect @ {cfg.anki_url})...[/bold]")
+    rprint(
+        f"[bold]📤 Syncing to Anki deck [cyan]{cfg.anki_deck}[/cyan] (AnkiConnect @ {cfg.anki_url})...[/bold]"
+    )
     try:
         anki = AnkiConnect(cfg)
         anki.setup()
 
-        exists = anki.has_word(card.word)
+        note_id = anki.find_word(card.word)
 
-        if exists and not overwrite:
+        if note_id is not None and not overwrite:
             rprint(
                 f"[yellow]⚠ '{card.word}' already exists. Use --overwrite / -w to replace it.[/yellow]"
             )
             raise typer.Exit(0)
 
-        if exists:
-            note_id = anki.update_card(card)
+        if note_id is not None:
+            note_id = anki.update_card(card, note_id=note_id)
             rprint(f"[green]✓ Updated! Note ID: {note_id}[/green]")
         else:
             note_id = anki.add_card(card)
@@ -173,13 +186,11 @@ def batch(
     provider: Optional[str] = typer.Option(
         None, "--provider", help="LLM provider: ollama (default) or huggingface"
     ),
-    debug: bool = typer.Option(False, "--debug", help="Show detailed LLM/OCR debug logs"),
+    debug: bool = typer.Option(
+        False, "--debug", help="Show detailed LLM/OCR debug logs"
+    ),
 ):
     """Add multiple words from a text file (one word per line)."""
-    from pathlib import Path
-
-    from kado.debug import set_debug
-
     set_debug(debug)
     words_file = Path(file)
     if not words_file.exists():
@@ -200,7 +211,7 @@ def batch(
                 overwrite=overwrite,
                 dry_run=False,
                 provider=provider,
-                debug=debug,
+                debug=False,  # set_debug already called once above the loop
             )
         except SystemExit:
             pass  # typer.Exit from add — continue with next word
@@ -251,9 +262,6 @@ def import_pdf(
     ),
 ):
     """Import vocabulary from a PDF file (e.g. J.Bridge 語彙リスト)."""
-    from pathlib import Path
-
-    from kado.debug import set_debug
     from kado.pdf_import import parse_vocab_pdf, dump_ocr_debug
 
     set_debug(debug)
@@ -268,7 +276,7 @@ def import_pdf(
     # Parse page selection
     page_set = _parse_pages(pages) if pages else None
 
-    from kado.sentences import resolve_model_name
+    from kado.sentences import generate_example, resolve_model_name
 
     resolved_name = resolve_model_name(
         provider=active_provider,
@@ -287,6 +295,7 @@ def import_pdf(
             provider=active_provider,
             ollama_url=cfg.ollama_url,
             ollama_model=cfg.ollama_model,
+            ollama_vision_model=cfg.ollama_vision_model,
         )
         rprint()
     else:
@@ -301,6 +310,7 @@ def import_pdf(
             provider=active_provider,
             ollama_url=cfg.ollama_url,
             ollama_model=cfg.ollama_model,
+            ollama_vision_model=cfg.ollama_vision_model,
         )
 
     if not cards:
@@ -310,13 +320,6 @@ def import_pdf(
     rprint(f"   [green]✓[/green] Found {len(cards)} words\n")
 
     # Preview table
-    _SOURCE_LABELS = {
-        "text": ("[green]text[/green]", "extracted from PDF text layer"),
-        "vision": ("[blue]vision[/blue]", "extracted by HF vision model"),
-        "ocr": ("[green]ocr[/green]", "found by OCR, cleaned by LLM"),
-        "llm": ("[yellow]llm[/yellow]", "reconstructed from German via LLM"),
-    }
-
     preview_table = Table(title=f"Vocabulary from {pdf_path.name}", show_lines=False)
     preview_table.add_column("#", style="dim", width=4)
     preview_table.add_column("Source", width=8)
@@ -331,8 +334,6 @@ def import_pdf(
     rprint(preview_table)
 
     # Source summary
-    from collections import Counter
-
     source_counts = Counter(c.source for c in cards)
     parts = []
     for src, (label, desc) in _SOURCE_LABELS.items():
@@ -356,7 +357,6 @@ def import_pdf(
     from kado.anki import AnkiConnect, AnkiConnectError
     from kado.audio import generate_audio
     from kado.dictionary import lookup
-    from kado.sentences import generate_example
 
     anki = AnkiConnect(cfg)
 
@@ -396,7 +396,7 @@ def import_pdf(
                 card.meaning = jisho_card.meaning or card.meaning
                 card.part_of_speech = jisho_card.part_of_speech
                 card.tags = jisho_card.tags
-            except (ValueError, Exception):
+            except Exception:
                 pass  # keep PDF data
 
         # Fill in reading from Jisho if PDF didn't have one
@@ -408,7 +408,7 @@ def import_pdf(
                     card.part_of_speech = jisho_card.part_of_speech
                 if not card.tags:
                     card.tags = jisho_card.tags
-            except (ValueError, Exception):
+            except Exception:
                 pass
 
         # Extra tags
@@ -440,12 +440,12 @@ def import_pdf(
 
         # Add or update
         try:
-            exists = anki.has_word(card.word)
-            if exists and not overwrite:
+            existing_note_id = anki.find_word(card.word)
+            if existing_note_id is not None and not overwrite:
                 rprint("   [yellow]⚠ Exists, skipping[/yellow]")
                 skipped += 1
-            elif exists:
-                anki.update_card(card)
+            elif existing_note_id is not None:
+                anki.update_card(card, note_id=existing_note_id)
                 rprint("   [green]✓ Updated[/green]")
                 updated += 1
             else:
@@ -478,6 +478,68 @@ def lookup_cmd(
         raise typer.Exit(1)
 
     _print_card_preview(card)
+
+
+# ── models ───────────────────────────────────────────────────────────
+
+
+@app.command()
+def models():
+    """Interactively select Ollama models for text and vision, saved to config."""
+    from InquirerPy import inquirer
+    from kado.ollama_utils import ollama_available_models, OLLAMA_VISION_MODELS
+
+    cfg = KadoConfig.load()
+    base_url = cfg.ollama_url or "http://localhost:11434"
+
+    with Console().status("[bold]Fetching installed Ollama models...[/bold]"):
+        available = ollama_available_models(base_url)
+
+    if available is None:
+        rprint(f"[red]✗[/red] Cannot reach Ollama at {base_url}")
+        rprint("  Make sure Ollama is running (and your SSH tunnel if using a remote server).")
+        raise typer.Exit(1)
+
+    if not available:
+        rprint("[yellow]⚠[/yellow] No models installed. Run: ollama pull qwen2.5:7b")
+        raise typer.Exit(1)
+
+    sorted_models = sorted(available)
+
+    # ── Text model ──
+    text_choices = ["(auto — use best available)"] + sorted_models
+    text_default = cfg.ollama_model if cfg.ollama_model in available else "(auto — use best available)"
+
+    text_choice = inquirer.select(
+        message="Select text/LLM model:",
+        choices=text_choices,
+        default=text_default,
+    ).execute()
+
+    new_text_model = "" if text_choice.startswith("(auto") else text_choice
+
+    # ── Vision model ──
+    vision_candidates_installed = [m for m in OLLAMA_VISION_MODELS if m in available]
+    vision_choices = ["(auto — use best available)"] + sorted_models
+    vision_default = cfg.ollama_vision_model if cfg.ollama_vision_model in available else "(auto — use best available)"
+
+    vision_choice = inquirer.select(
+        message="Select vision model (for PDF import):",
+        choices=vision_choices,
+        default=vision_default,
+        instruction=f"  Recognized vision models installed: {', '.join(vision_candidates_installed) or 'none'}",
+    ).execute()
+
+    new_vision_model = "" if vision_choice.startswith("(auto") else vision_choice
+
+    # ── Save ──
+    cfg.ollama_model = new_text_model
+    cfg.ollama_vision_model = new_vision_model
+    cfg.save()
+
+    rprint(f"\n[green]✓[/green] Text model:   [bold]{new_text_model or '(auto)'}[/bold]")
+    rprint(f"[green]✓[/green] Vision model: [bold]{new_vision_model or '(auto)'}[/bold]")
+    rprint(f"[dim]Saved to {CONFIG_PATH}[/dim]")
 
 
 # ── config ───────────────────────────────────────────────────────────
@@ -557,9 +619,11 @@ def status():
     except AnkiConnectError as e:
         rprint(f"[yellow]⚠[/yellow] Deck info: {e}")
 
-    from kado.sentences import resolve_model_name, _ollama_available_models
+    from kado.ollama_utils import OLLAMA_VISION_MODELS, ollama_available_models, ollama_resolve_model
+    from kado.sentences import resolve_model_name
 
     prov = cfg.sentence_provider
+    available: set[str] | None = None
 
     if prov == "ollama":
         resolved = resolve_model_name(
@@ -567,22 +631,47 @@ def status():
             model=cfg.ollama_model or None,
             ollama_url=cfg.ollama_url,
         )
-        rprint(f"\n  LLM provider:        [green]ollama[/green] → [bold]{resolved}[/bold]")
+        rprint(
+            f"\n  LLM provider:        [green]ollama[/green] → [bold]{resolved}[/bold]"
+        )
 
         # Show all installed Ollama models
-        available = _ollama_available_models(cfg.ollama_url)
+        available = ollama_available_models(cfg.ollama_url or "")
         if available is not None:
             rprint(f"  Installed models:    {', '.join(sorted(available))}")
         else:
-            rprint("  Ollama:              [red]not running[/red] — start with: ollama serve")
+            rprint(
+                "  Ollama:              [red]not running[/red] — start with: ollama serve"
+            )
     elif prov == "huggingface":
         resolved = resolve_model_name(
             provider="huggingface",
             model=cfg.hf_model or None,
         )
-        rprint(f"\n  LLM provider:        [green]huggingface[/green] → [bold]{resolved}[/bold]")
+        rprint(
+            f"\n  LLM provider:        [green]huggingface[/green] → [bold]{resolved}[/bold]"
+        )
     else:
         rprint("\n  Sentence generation: [dim]disabled[/dim]")
+
+    # Vision model status
+    if prov == "ollama" and available is not None:
+        vision_pinned = (
+            cfg.ollama_vision_model
+            or os.environ.get("KADO_OLLAMA_VISION_MODEL", "")
+        )
+        vision_candidates = [vision_pinned] if vision_pinned else OLLAMA_VISION_MODELS
+        vision_resolved = next(
+            (ollama_resolve_model(m, available) for m in vision_candidates if ollama_resolve_model(m, available)),
+            None,
+        )
+        if vision_resolved:
+            pinned_label = " [dim](pinned)[/dim]" if vision_pinned else ""
+            rprint(f"  Vision model:        [green]{vision_resolved}[/green]{pinned_label}")
+        else:
+            rprint("  Vision model:        [yellow]none installed[/yellow] — run: kado models")
+    elif prov == "ollama":
+        rprint("  Vision model:        [dim]unknown (Ollama not reachable)[/dim]")
 
     rprint(
         f"  Audio generation:    {'[green]gTTS[/green]' if cfg.audio_enabled else '[dim]disabled[/dim]'}"
@@ -604,9 +693,7 @@ def export(
 
     rprint(f"[bold]Exporting deck '{cfg.anki_deck}'...[/bold]")
     try:
-        path = anki._invoke(
-            "exportPackage", deck=cfg.anki_deck, path=output, includeSched=False
-        )
+        path = anki.export_deck(cfg.anki_deck, output, include_scheduling=False)
         rprint(f"[green]✓ Exported to {path or output}[/green]")
     except AnkiConnectError as e:
         rprint(f"[red]✗ Export failed: {e}[/red]")
@@ -678,11 +765,16 @@ def _parse_pages(spec: str) -> set[int]:
     result: set[int] = set()
     for part in spec.split(","):
         part = part.strip()
-        if "-" in part:
-            start, end = part.split("-", 1)
-            result.update(range(int(start), int(end) + 1))
-        else:
-            result.add(int(part))
+        try:
+            if "-" in part:
+                start, end = part.split("-", 1)
+                result.update(range(int(start), int(end) + 1))
+            else:
+                result.add(int(part))
+        except ValueError:
+            raise typer.BadParameter(
+                f"Invalid page spec: '{spec}'. Use format like '1-5,7,10-12'"
+            )
     return result
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import json
 import urllib.request
@@ -74,7 +75,7 @@ class AnkiConnect:
     # Low-level
     # ------------------------------------------------------------------
 
-    def _invoke(self, action: str, **params) -> dict:
+    def _invoke(self, action: str, **params) -> Any:
         payload = {"action": action, "version": self._version}
         if params:
             payload["params"] = params
@@ -159,18 +160,18 @@ class AnkiConnect:
             "options": {"allowDuplicate": False},
         }
 
-        # Attach audio if we have a file
+        note_id = self._invoke("addNote", note=note)
+
+        # Store audio file separately and reference it in the Audio field
         if card.audio_path and Path(card.audio_path).exists():
             filename = Path(card.audio_path).name
-            note["audio"] = [
-                {
-                    "path": str(card.audio_path),
-                    "filename": filename,
-                    "fields": ["Audio"],
-                }
-            ]
+            self._invoke("storeMediaFile", filename=filename, path=str(card.audio_path))
+            self._invoke(
+                "updateNoteFields",
+                note={"id": note_id, "fields": {"Audio": f"[sound:{filename}]"}},
+            )
 
-        return self._invoke("addNote", note=note)
+        return note_id
 
     def get_existing_vocab(self, limit: int = 200) -> list[str]:
         """Return a list of words already in the deck (for sentence context)."""
@@ -192,7 +193,8 @@ class AnkiConnect:
 
     def find_word(self, word: str) -> int | None:
         """Find a note ID for a word in the deck. Returns None if not found."""
-        query = f'"deck:{self.deck}" Word:{word}'
+        escaped = word.replace('"', '\\"')
+        query = f'"deck:{self.deck}" Word:"{escaped}"'
         ids = self._invoke("findNotes", query=query)
         return ids[0] if ids else None
 
@@ -200,9 +202,14 @@ class AnkiConnect:
         """Check if a word already exists in the deck."""
         return self.find_word(word) is not None
 
-    def update_card(self, card: VocabCard) -> int:
-        """Update an existing card in Anki. Returns the note ID."""
-        note_id = self.find_word(card.word)
+    def update_card(self, card: VocabCard, note_id: int | None = None) -> int:
+        """Update an existing card in Anki. Returns the note ID.
+
+        If *note_id* is provided it is used directly, avoiding a redundant
+        ``find_word`` lookup (useful when the caller already holds the id).
+        """
+        if note_id is None:
+            note_id = self.find_word(card.word)
         if not note_id:
             raise AnkiConnectError(f"Note not found for '{card.word}'")
 
@@ -220,7 +227,6 @@ class AnkiConnect:
         # Update audio separately if we have a file
         if card.audio_path and Path(card.audio_path).exists():
             filename = Path(card.audio_path).name
-            fields["Audio"] = f"[sound:{filename}]"
             self._invoke(
                 "updateNoteFields",
                 note={"id": note_id, "fields": {"Audio": f"[sound:{filename}]"}},
@@ -232,6 +238,28 @@ class AnkiConnect:
             self._invoke("addTags", notes=[note_id], tags=" ".join(card.tags))
 
         return note_id
+
+    def export_deck(
+        self, deck: str, path: str, include_scheduling: bool = False
+    ) -> str:
+        """Export *deck* to an .apkg file at *path*.
+
+        Args:
+            deck: Deck name to export.
+            path: Absolute filesystem path for the output .apkg file.
+            include_scheduling: When ``True``, scheduling information is
+                included in the export (default ``False``).
+
+        Returns:
+            The result string returned by AnkiConnect (typically ``None``
+            on success, which AnkiConnect represents as a JSON null).
+        """
+        return self._invoke(
+            "exportPackage",
+            deck=deck,
+            path=path,
+            includeSched=include_scheduling,
+        )
 
     # ------------------------------------------------------------------
     # Health check
