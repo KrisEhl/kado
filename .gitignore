@@ -6,3 +6,4 @@ build/
 .env
 *.pyc
 .DS_Store
+.claude/worktrees/
