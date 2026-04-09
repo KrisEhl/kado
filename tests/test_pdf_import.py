@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from kado.models import VocabCard
-from kado.pdf_import import _normalize_word, _parse_llm_json, _dedup_key
+from kado.pdf_import import _normalize_word, _parse_llm_json, _dedup_key, _is_garbage_meaning, _clean_reading
 
 
 # ── _normalize_word ───────────────────────────────────────────────────
@@ -168,6 +168,56 @@ def test_dedup_key_na_forms_collide():
 def test_dedup_key_normalizes_fullwidth_brackets_first():
     # Full-width brackets get converted before stripping
     assert _dedup_key("発展（する）") == "発展"
+
+
+# ── _is_garbage_meaning ──────────────────────────────────────────────
+
+
+def test_garbage_meaning_all_caps_no_spaces():
+    assert _is_garbage_meaning("BQSOUL") is True
+
+
+def test_garbage_meaning_consonant_heavy():
+    assert _is_garbage_meaning("Trnbeeland") is True  # 4 consecutive consonants
+    assert _is_garbage_meaning("Klelhn") is True      # 1/6 vowels < 0.25
+    assert _is_garbage_meaning("Kleelhn") is True     # trailing -lhn = 3 consonants
+
+
+
+def test_garbage_meaning_too_short():
+    assert _is_garbage_meaning("am") is True
+    assert _is_garbage_meaning("") is True
+
+
+def test_garbage_meaning_real_german_phrase():
+    assert _is_garbage_meaning("Entwicklung; sich entwickeln") is False
+    assert _is_garbage_meaning("Park des Friedens") is False  # 3 words, passes
+
+
+def test_garbage_meaning_real_single_word():
+    assert _is_garbage_meaning("England") is False
+    assert _is_garbage_meaning("Amerika") is False
+    assert _is_garbage_meaning("tram") is False
+    assert _is_garbage_meaning("Chinatown") is False
+
+
+# ── _clean_reading ───────────────────────────────────────────────────
+
+
+def test_clean_reading_removes_romaji():
+    assert _clean_reading("nekutai pin") == ""
+
+
+def test_clean_reading_keeps_hiragana():
+    assert _clean_reading("ねくたいぴん") == "ねくたいぴん"
+
+
+def test_clean_reading_keeps_empty():
+    assert _clean_reading("") == ""
+
+
+def test_clean_reading_normalizes_brackets():
+    assert _clean_reading("かんこう（する）") == "かんこう(する)"
 
 
 # ── _merge_sources (via pure logic, no LLM) ───────────────────────────

@@ -203,6 +203,7 @@ def _generate_via_ollama(
                     "messages": [{"role": "user", "content": prompt}],
                     "stream": False,
                     "options": {
+                        "num_ctx": 4096,
                         "num_predict": 200,
                         "temperature": 0.7,
                     },

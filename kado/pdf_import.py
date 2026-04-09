@@ -160,20 +160,32 @@ def _merge_sources(
     # Normalize words for matching (full-width ↔ half-width brackets, する/な forms)
     ocr_norm = {_dedup_key(c.word) for c in ocr_cards}
 
+    # All non-vision words — used to detect truncated vision hallucinations
+    other_words = [_normalize_word(c.word) for c in ocr_cards + llm_cards if c.word]
+
     merged: list[VocabCard] = []
     seen: set[str] = set()  # dedup keys (base forms, する/な stripped)
+    merged_words: set[str] = set()  # full normalized words already accepted
 
-    # Pass 1: vision cards — best quality, normalize word to canonical form
+    # Pass 1: vision cards — best quality, normalize word to canonical form.
     for card in vision_cards:
         if not card.word:
             continue
         card.word = _normalize_word(card.word)
-        card.reading = card.reading.replace("（", "(").replace("）", ")")
+        card.reading = _clean_reading(card.reading)
         key = _dedup_key(card.word)
         if key in seen:
             continue
+        if _is_garbage_meaning(card.meaning):
+            debug_print(f"Vision: discarding '{card.word}' — garbage meaning: '{card.meaning}'")
+            continue
+        # Discard if this looks like a truncated prefix of a longer word found elsewhere
+        if any(w.startswith(card.word) and len(w) > len(card.word) for w in other_words):
+            debug_print(f"Vision: discarding '{card.word}' — truncated prefix of a longer word")
+            continue
         card.source = "vision"
         seen.add(key)
+        merged_words.add(card.word)
         merged.append(card)
 
     # Pass 2: LLM cards — clean English meanings
@@ -184,9 +196,16 @@ def _merge_sources(
         key = _dedup_key(norm)
         if key in seen:
             continue
+        # Skip if this word is already covered as a substring of a longer accepted word
+        # e.g. 半球 is redundant if 南半球 was already added
+        if any(norm in w and len(w) > len(norm) for w in merged_words):
+            debug_print(f"LLM: discarding '{norm}' — substring of already-accepted word")
+            continue
         card.word = norm
+        card.reading = _clean_reading(card.reading)
         card.source = "ocr" if key in ocr_norm else "llm"
         seen.add(key)
+        merged_words.add(norm)
         merged.append(card)
 
     # Pass 3: OCR-only cards — clean up with LLM before including
@@ -207,10 +226,19 @@ def _merge_sources(
             ollama_model=ollama_model,
         )
         for card in cleaned:
+            card.reading = _clean_reading(card.reading)
             key = _dedup_key(card.word)
-            if key not in seen:
-                seen.add(key)
-                merged.append(card)
+            if key in seen:
+                continue
+            if any(card.word in w and len(w) > len(card.word) for w in merged_words):
+                debug_print(f"OCR: discarding '{card.word}' — substring of already-accepted word")
+                continue
+            if _is_garbage_meaning(card.meaning):
+                debug_print(f"OCR: discarding '{card.word}' — garbage meaning after LLM cleanup")
+                continue
+            seen.add(key)
+            merged_words.add(card.word)
+            merged.append(card)
 
     return merged
 
@@ -462,15 +490,18 @@ def _extract_via_vision(
 
     prompt = (
         "This image is a Japanese vocabulary list table from a textbook.\n"
-        "Extract ALL vocabulary entries from the table.\n\n"
+        "Extract vocabulary entries that are CLEARLY VISIBLE in the table.\n\n"
         "The table columns are: 漢字 | 漢字の意味 | 単語（漢字）| 単語（読み方）| 単語の意味\n"
         "I need columns 3, 4, and 5: the word, reading, and meaning.\n\n"
         "For each entry, extract:\n"
         "- word: the Japanese word (単語) in kanji or katakana from column 3\n"
-        "- reading: the hiragana reading (読み方) from column 4, empty if none\n"
+        "- reading: the hiragana reading (読み方) from column 4, empty string if none\n"
         "- meaning: the meaning/translation (単語の意味) from column 5\n\n"
-        "Include katakana-only words (like エジプト, ガイドブック) and entries "
-        "that only appear in column 3 with no reading.\n\n"
+        "IMPORTANT RULES:\n"
+        "- Only include rows where you can clearly read BOTH the word AND the meaning\n"
+        "- If a meaning cell contains an image, graphic, or is unclear, omit that row entirely\n"
+        "- Do NOT guess, infer, or hallucinate — only transcribe what you can actually see\n"
+        "- Include katakana-only words (like エジプト, ガイドブック)\n\n"
         "Return ONLY a JSON array, no markdown fences, no explanation:\n"
         '[{"word": "観光する", "reading": "かんこうする", "meaning": "Besichtigen v. Sehenswürdigkeiten"}, ...]'
     )
@@ -791,6 +822,7 @@ def _try_ollama(
                     "messages": [{"role": "user", "content": prompt}],
                     "stream": False,
                     "options": {
+                        "num_ctx": 8192,
                         "num_predict": max_tokens,
                         "temperature": temperature,
                     },
@@ -1421,6 +1453,62 @@ def _clean_ocr_meaning(text: str) -> str:
     if len(text) < 3:
         return ""
     return text
+
+
+_VOWELS = set("aeiouäöüAEIOUÄÖÜ")
+
+
+def _is_garbage_meaning(text: str) -> bool:
+    """Return True if a meaning string looks like a vision hallucination.
+
+    Detects strings like "BQSOUL", "Trnbeeland", "Klelhn", "am" that the
+    vision model produces when it can't find real text in the meaning cell
+    (e.g., the cell contains a flag or graphic).
+    """
+    if not text:
+        return True
+    # Too short to be a real meaning
+    if len(text) < 3:
+        return True
+    # Single token (no spaces) — real German meanings are almost always phrases
+    if " " not in text:
+        # All-uppercase alphabetic string (e.g. "BQSOUL") — never a real meaning
+        if len(text) >= 4 and text.isupper():
+            return True
+        if len(text) >= 5:
+            # Very consonant-heavy: fewer than 25% vowels (catches "Klelhn" at 1/6)
+            vowel_ratio = sum(1 for c in text if c in _VOWELS) / len(text)
+            if vowel_ratio < 0.25:
+                return True
+            # Long consecutive consonant run (catches "Trnbeeland": T-r-n-b = 4)
+            # Also checks trailing consonant cluster (catches "Kleelhn": -lhn = 3)
+            max_run = run = trailing_run = 0
+            for c in text:
+                if c.isalpha() and c not in _VOWELS:
+                    run += 1
+                    max_run = max(max_run, run)
+                    trailing_run += 1
+                else:
+                    run = 0
+                    trailing_run = 0
+            if max_run >= 4 or trailing_run >= 3:
+                return True
+    return False
+
+
+def _clean_reading(reading: str) -> str:
+    """Return empty string if a reading contains romaji/latin characters.
+
+    Real Japanese readings are hiragana only. If OCR produces something like
+    'nekutai pin' for ネクタイピン, it's noise and should be discarded.
+    """
+    if not reading:
+        return reading
+    reading = reading.replace("（", "(").replace("）", ")")
+    # Any latin letter means it's romaji or noise, not a valid hiragana reading
+    if any(c.isascii() and c.isalpha() for c in reading):
+        return ""
+    return reading
 
 
 def _dedup_key(text: str) -> str:
