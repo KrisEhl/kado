@@ -93,6 +93,15 @@ def _extract_scanned(
     llm_cards: list[VocabCard] = []
     ocr_cards: list[VocabCard] = []
 
+    # 0. Pre-warm the model — loads it into VRAM before the timed pipeline starts.
+    # On a cold start a 36GB model can take 1–2 min to load; without warming the
+    # 600 s inference timeout fires before any real work is done.
+    if provider == "ollama":
+        _ollama_preload(
+            ollama_url=ollama_url,
+            model=ollama_vision_model or ollama_model,
+        )
+
     # 1. Vision model first — runs before LLM so the vision model loads into VRAM
     # without having to evict the text model first (Ollama loads one model at a time)
     if use_vision:
@@ -578,6 +587,62 @@ def _extract_via_vision(
     return all_cards
 
 
+def _ollama_preload(*, ollama_url: str = "", model: str = "") -> None:
+    """Send a minimal request to force the model to load into VRAM.
+
+    On a cold start a 36 GB model can take 1-2 minutes to load from disk.
+    We do this once with a long timeout so that subsequent vision/LLM calls
+    hit an already-warm model and finish well within their own 600 s budget.
+    """
+    base_url = ollama_url or os.environ.get("KADO_OLLAMA_URL", OLLAMA_URL)
+    if not model:
+        model = os.environ.get("KADO_OLLAMA_MODEL", "") or os.environ.get("KADO_OLLAMA_VISION_MODEL", "")
+    if not model:
+        return
+
+    available = ollama_available_models(base_url)
+    if available is None:
+        return
+    resolved = ollama_resolve_model(model, available)
+    if not resolved:
+        return
+
+    # Check if already loaded — ollama /api/ps lists running models
+    try:
+        req = urllib.request.Request(f"{base_url}/api/ps", method="GET")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            ps = json.loads(resp.read())
+            running = {m.get("name", "") for m in ps.get("models", [])}
+            if resolved in running:
+                debug_print(f"Model {resolved} already loaded in VRAM — skipping preload")
+                return
+    except (urllib.error.URLError, OSError, json.JSONDecodeError):
+        pass
+
+    debug_print(f"Pre-warming model {resolved} (loading into VRAM)...")
+    payload = json.dumps(
+        {
+            "model": resolved,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": False,
+            "keep_alive": "30m",
+            "options": {"num_predict": 1, "num_ctx": 512, "think": False},
+        }
+    ).encode()
+    try:
+        req = urllib.request.Request(
+            f"{base_url}/api/chat",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=1200) as resp:
+            resp.read()
+        debug_print(f"Model {resolved} loaded — proceeding with pipeline")
+    except (urllib.error.URLError, OSError) as e:
+        debug_print(f"Preload failed ({e}) — continuing anyway")
+
+
 def _try_ollama_vision(
     b64_image: str, prompt: str, models: list[str], ollama_url: str = ""
 ) -> list[VocabCard]:
@@ -586,6 +651,7 @@ def _try_ollama_vision(
 
     available_names = ollama_available_models(base_url)
     if available_names is None:
+        debug_print("Vision: Ollama not reachable (tunnel down?)")
         return []
 
     for model in models:
@@ -824,6 +890,7 @@ def _try_ollama(
 
     available_names = ollama_available_models(base_url)
     if available_names is None:
+        debug_print("LLM: Ollama not reachable (tunnel down?)")
         return None  # Ollama not running
 
     for model in models_to_try:
@@ -1248,6 +1315,12 @@ def dump_ocr_debug(
     """Full debug: raw OCR → column parsing → LLM reconstruction."""
     import pytesseract
     from pdf2image import convert_from_path
+
+    if provider == "ollama":
+        _ollama_preload(
+            ollama_url=ollama_url,
+            model=ollama_vision_model or ollama_model,
+        )
 
     images = convert_from_path(path, dpi=300)
 
