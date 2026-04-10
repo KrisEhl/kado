@@ -93,18 +93,11 @@ def _extract_scanned(
     llm_cards: list[VocabCard] = []
     ocr_cards: list[VocabCard] = []
 
-    # 0. Pre-warm the model — loads it into VRAM before the timed pipeline starts.
-    # On a cold start a 36GB model can take 1–2 min to load; without warming the
-    # 600 s inference timeout fires before any real work is done.
-    if provider == "ollama":
-        _ollama_preload(
-            ollama_url=ollama_url,
-            model=ollama_vision_model or ollama_model,
-        )
-
     # 1. Vision model first — runs before LLM so the vision model loads into VRAM
     # without having to evict the text model first (Ollama loads one model at a time)
     if use_vision:
+        if provider == "ollama" and ollama_vision_model:
+            _ollama_preload(ollama_url=ollama_url, model=ollama_vision_model)
         vision_cards = _extract_via_vision(
             path, pages=pages, provider=provider, ollama_url=ollama_url,
             ollama_vision_model=ollama_vision_model,
@@ -117,7 +110,11 @@ def _extract_scanned(
         debug_print(f"OCR unavailable: {e}")
 
     # 3. LLM reconstruction from raw OCR text
+    # Pre-warm the text model before starting — if it differs from the vision model,
+    # Ollama will have evicted it and needs to reload (another potential cold-start).
     if llm_cleanup and ocr_cards is not None:
+        if provider == "ollama" and ollama_model:
+            _ollama_preload(ollama_url=ollama_url, model=ollama_model)
         try:
             page_dumps = _get_raw_ocr_pages(path, pages=pages)
             llm_cards = _llm_reconstruct_from_ocr(
@@ -657,7 +654,34 @@ def _try_ollama_vision(
     for model in models:
         resolved = ollama_resolve_model(model, available_names)
         if not resolved:
+            debug_print(f"Vision: model '{model}' not installed — skipping")
             continue
+
+        # Check if the model actually supports image input
+        try:
+            req = urllib.request.Request(
+                f"{base_url}/api/show",
+                data=json.dumps({"name": resolved}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                info = json.loads(resp.read())
+            families = info.get("details", {}).get("families", [])
+            has_vision = any(f in families for f in ("clip", "mllama", "qwen2_5vl", "qwen3_5"))
+            # Also check for image_size in model_info as a proxy
+            if not has_vision:
+                img_size = info.get("model_info", {}).get("clip.vision.image_size") or \
+                           info.get("model_info", {}).get("mllama.vision.image_size")
+                has_vision = img_size is not None
+            if not has_vision:
+                debug_print(
+                    f"Vision: '{resolved}' has no image projector — text-only model, skipping.\n"
+                    f"  Run: kado models  — and pick a vision model like qwen2.5vl:32b-q8_0"
+                )
+                continue
+        except (urllib.error.URLError, OSError, json.JSONDecodeError):
+            pass  # can't check, try anyway
 
         try:
             payload = json.dumps(
@@ -697,6 +721,8 @@ def _try_ollama_vision(
                     if not cards:
                         debug_print(f"Vision parse returned empty. Raw response (first 500 chars): {text[:500]!r}")
                     return cards
+                else:
+                    debug_print(f"Ollama vision ({resolved}): empty response (model may not support images)")
         except urllib.error.HTTPError as e:
             body = e.read().decode(errors="replace")[:500]
             debug_print(f"Ollama vision {resolved}: HTTP {e.code} — {body}")
@@ -1316,12 +1342,6 @@ def dump_ocr_debug(
     import pytesseract
     from pdf2image import convert_from_path
 
-    if provider == "ollama":
-        _ollama_preload(
-            ollama_url=ollama_url,
-            model=ollama_vision_model or ollama_model,
-        )
-
     images = convert_from_path(path, dpi=300)
 
     # ── Phase 1: Raw OCR + column parsing ──
@@ -1387,6 +1407,9 @@ def dump_ocr_debug(
         print("VISION MODEL")
         print(f"{'=' * 60}")
 
+        if provider == "ollama" and ollama_vision_model:
+            _ollama_preload(ollama_url=ollama_url, model=ollama_vision_model)
+
         vision_cards = (
             _extract_via_vision(
                 path,
@@ -1415,6 +1438,9 @@ def dump_ocr_debug(
     print(f"\n{'=' * 60}")
     print("LLM RECONSTRUCTION")
     print(f"{'=' * 60}")
+
+    if provider == "ollama" and ollama_model:
+        _ollama_preload(ollama_url=ollama_url, model=ollama_model)
 
     llm_cards = (
         _llm_reconstruct_from_ocr(
