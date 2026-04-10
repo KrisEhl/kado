@@ -667,13 +667,9 @@ def _try_ollama_vision(
             )
             with urllib.request.urlopen(req, timeout=5) as resp:
                 info = json.loads(resp.read())
-            families = info.get("details", {}).get("families", [])
-            has_vision = any(f in families for f in ("clip", "mllama", "qwen2_5vl", "qwen3_5"))
-            # Also check for image_size in model_info as a proxy
-            if not has_vision:
-                img_size = info.get("model_info", {}).get("clip.vision.image_size") or \
-                           info.get("model_info", {}).get("mllama.vision.image_size")
-                has_vision = img_size is not None
+            # Detect vision capability: any model_info key containing ".vision."
+            # covers qwen25vl, clip, mllama, and future VL model families
+            has_vision = any(".vision." in k for k in info.get("model_info", {}))
             if not has_vision:
                 debug_print(
                     f"Vision: '{resolved}' has no image projector — text-only model, skipping.\n"
