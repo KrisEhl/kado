@@ -206,6 +206,7 @@ def _generate_via_ollama(
                         "num_ctx": 4096,
                         "num_predict": 200,
                         "temperature": 0.7,
+                        "think": False,
                     },
                 }
             ).encode()

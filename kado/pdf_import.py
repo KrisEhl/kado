@@ -609,6 +609,7 @@ def _try_ollama_vision(
                         "num_ctx": 8192,
                         "num_predict": 2048,
                         "temperature": 0.1,
+                        "think": False,
                     },
                 }
             ).encode()
@@ -624,7 +625,10 @@ def _try_ollama_vision(
                 text = data.get("message", {}).get("content", "").strip()
                 if text:
                     debug_print(f"Ollama vision ({resolved}): OK")
-                    return _parse_llm_json(text)
+                    cards = _parse_llm_json(text)
+                    if not cards:
+                        debug_print(f"Vision parse returned empty. Raw response (first 500 chars): {text[:500]!r}")
+                    return cards
         except urllib.error.HTTPError as e:
             body = e.read().decode(errors="replace")[:500]
             debug_print(f"Ollama vision {resolved}: HTTP {e.code} — {body}")
@@ -661,6 +665,8 @@ def _is_table_noise(word: str) -> bool:
 
 
 def _parse_llm_json(text: str) -> list[VocabCard]:
+    # Strip Qwen3 / reasoning model <think>...</think> blocks before parsing
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
     match = re.search(r"\[.*\]", text, re.DOTALL)
     if not match:
         return []
@@ -773,11 +779,19 @@ def _warn_ollama_missing(*, ollama_url: str = "", ollama_model: str = "") -> Non
 
     override = ollama_model or os.environ.get("KADO_OLLAMA_MODEL", "")
     if override:
-        print(
-            f"   Model '{override}' is not installed. Install it with:\n"
-            f"     ollama pull {override}",
-            file=sys.stderr,
-        )
+        resolved = ollama_resolve_model(override, available)
+        if resolved:
+            print(
+                f"   Model '{override}' is installed but did not respond in time.\n"
+                f"   It may still be loading — try again in a moment.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"   Model '{override}' is not installed. Install it with:\n"
+                f"     ollama pull {override}",
+                file=sys.stderr,
+            )
         return
 
     installed = sorted(available)
@@ -825,6 +839,7 @@ def _try_ollama(
                         "num_ctx": 8192,
                         "num_predict": max_tokens,
                         "temperature": temperature,
+                        "think": False,
                     },
                 }
             ).encode()
@@ -835,7 +850,7 @@ def _try_ollama(
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with urllib.request.urlopen(req, timeout=300) as resp:
                 data = json.loads(resp.read())
                 text = data.get("message", {}).get("content", "").strip()
                 if text:

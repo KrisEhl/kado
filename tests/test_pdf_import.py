@@ -90,6 +90,22 @@ def test_parse_llm_json_with_markdown_wrapper():
     assert cards[0].word == "学校"
 
 
+def test_parse_llm_json_strips_think_tags():
+    # Qwen3 / reasoning models wrap output in <think>...</think> before the JSON
+    text = '<think>\nLet me analyze the table carefully.\n</think>\n[{"word": "学校", "reading": "がっこう", "meaning": "school"}]'
+    cards = _parse_llm_json(text)
+    assert len(cards) == 1
+    assert cards[0].word == "学校"
+
+
+def test_parse_llm_json_think_tags_with_brackets_inside():
+    # Think block may contain [...] that would confuse naive regex — stripped first
+    text = '<think>\nThe columns are [word, reading, meaning]\n</think>\n[{"word": "東京", "reading": "とうきょう", "meaning": "Tokyo"}]'
+    cards = _parse_llm_json(text)
+    assert len(cards) == 1
+    assert cards[0].word == "東京"
+
+
 def test_parse_llm_json_strips_non_japanese():
     # Entry without Japanese characters should be filtered out
     text = '[{"word": "hello", "reading": "", "meaning": "english word"}]'
