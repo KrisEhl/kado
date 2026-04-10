@@ -193,13 +193,6 @@ def test_garbage_meaning_all_caps_no_spaces():
     assert _is_garbage_meaning("BQSOUL") is True
 
 
-def test_garbage_meaning_consonant_heavy():
-    assert _is_garbage_meaning("Trnbeeland") is True  # 4 consecutive consonants
-    assert _is_garbage_meaning("Klelhn") is True      # 1/6 vowels < 0.25
-    assert _is_garbage_meaning("Kleelhn") is True     # trailing -lhn = 3 consonants
-
-
-
 def test_garbage_meaning_too_short():
     assert _is_garbage_meaning("am") is True
     assert _is_garbage_meaning("") is True
@@ -207,14 +200,19 @@ def test_garbage_meaning_too_short():
 
 def test_garbage_meaning_real_german_phrase():
     assert _is_garbage_meaning("Entwicklung; sich entwickeln") is False
-    assert _is_garbage_meaning("Park des Friedens") is False  # 3 words, passes
+    assert _is_garbage_meaning("Park des Friedens") is False
 
 
 def test_garbage_meaning_real_single_word():
+    # German has consonant clusters (sch, ldkr) and low-vowel words — don't flag them
     assert _is_garbage_meaning("England") is False
     assert _is_garbage_meaning("Amerika") is False
     assert _is_garbage_meaning("tram") is False
     assert _is_garbage_meaning("Chinatown") is False
+    assert _is_garbage_meaning("Schaf") is False           # 1 vowel, valid German
+    assert _is_garbage_meaning("Rugby") is False           # trailing consonants, valid
+    assert _is_garbage_meaning("Fleischpastete") is False  # sch+p cluster, valid
+    assert _is_garbage_meaning("Schildkrötenpanzer") is False  # ldkr cluster, valid
 
 
 # ── _clean_reading ───────────────────────────────────────────────────

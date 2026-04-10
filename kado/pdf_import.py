@@ -108,7 +108,10 @@ def _extract_scanned(
         debug_print(f"OCR unavailable: {e}")
 
     # 3. LLM reconstruction from raw OCR text
-    if llm_cleanup and ocr_cards is not None:
+    # Skip if vision already found many entries — LLM reconstruction is mainly
+    # a fallback for when vision is unavailable or returned few results.
+    vision_found_enough = len(vision_cards) >= max(5, len(ocr_cards or []))
+    if llm_cleanup and ocr_cards is not None and not vision_found_enough:
         try:
             page_dumps = _get_raw_ocr_pages(path, pages=pages)
             llm_cards = _llm_reconstruct_from_ocr(
@@ -1476,38 +1479,23 @@ _VOWELS = set("aeiouäöüAEIOUÄÖÜ")
 def _is_garbage_meaning(text: str) -> bool:
     """Return True if a meaning string looks like a vision hallucination.
 
-    Detects strings like "BQSOUL", "Trnbeeland", "Klelhn", "am" that the
-    vision model produces when it can't find real text in the meaning cell
+    Detects strings like "BQSOUL" or very short fragments that the vision
+    model produces when it can't find real text in the meaning cell
     (e.g., the cell contains a flag or graphic).
+
+    Intentionally conservative: German has consonant clusters like "sch",
+    "ldkr" (Schildkrötenpanzer) and low-vowel words like "Schaf", "Rugby"
+    that would be falsely flagged by stricter heuristics.
     """
     if not text:
         return True
     # Too short to be a real meaning
     if len(text) < 3:
         return True
-    # Single token (no spaces) — real German meanings are almost always phrases
-    if " " not in text:
-        # All-uppercase alphabetic string (e.g. "BQSOUL") — never a real meaning
-        if len(text) >= 4 and text.isupper():
-            return True
-        if len(text) >= 5:
-            # Very consonant-heavy: fewer than 25% vowels (catches "Klelhn" at 1/6)
-            vowel_ratio = sum(1 for c in text if c in _VOWELS) / len(text)
-            if vowel_ratio < 0.25:
-                return True
-            # Long consecutive consonant run (catches "Trnbeeland": T-r-n-b = 4)
-            # Also checks trailing consonant cluster (catches "Kleelhn": -lhn = 3)
-            max_run = run = trailing_run = 0
-            for c in text:
-                if c.isalpha() and c not in _VOWELS:
-                    run += 1
-                    max_run = max(max_run, run)
-                    trailing_run += 1
-                else:
-                    run = 0
-                    trailing_run = 0
-            if max_run >= 4 or trailing_run >= 3:
-                return True
+    # All-uppercase alphabetic string with no spaces — never a real German meaning
+    # e.g. "BQSOUL", "XKZWQ" — real abbreviations contain punctuation or spaces
+    if " " not in text and len(text) >= 4 and text.isalpha() and text.isupper():
+        return True
     return False
 
 
