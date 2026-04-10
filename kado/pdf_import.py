@@ -600,7 +600,7 @@ def _try_ollama_vision(
                     "messages": [
                         {
                             "role": "user",
-                            "content": prompt,
+                            "content": f"/no_think\n{prompt}",
                             "images": [b64_image],
                         }
                     ],
@@ -833,7 +833,7 @@ def _try_ollama(
             payload = json.dumps(
                 {
                     "model": resolved,
-                    "messages": [{"role": "user", "content": prompt}],
+                    "messages": [{"role": "user", "content": f"/no_think\n{prompt}"}],
                     "stream": False,
                     "options": {
                         "num_ctx": 8192,
