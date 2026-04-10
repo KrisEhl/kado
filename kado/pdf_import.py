@@ -108,10 +108,7 @@ def _extract_scanned(
         debug_print(f"OCR unavailable: {e}")
 
     # 3. LLM reconstruction from raw OCR text
-    # Skip if vision already found many entries — LLM reconstruction is mainly
-    # a fallback for when vision is unavailable or returned few results.
-    vision_found_enough = len(vision_cards) >= max(5, len(ocr_cards or []))
-    if llm_cleanup and ocr_cards is not None and not vision_found_enough:
+    if llm_cleanup and ocr_cards is not None:
         try:
             page_dumps = _get_raw_ocr_pages(path, pages=pages)
             llm_cards = _llm_reconstruct_from_ocr(
