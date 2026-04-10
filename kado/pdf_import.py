@@ -598,13 +598,15 @@ def _try_ollama_vision(
                 {
                     "model": resolved,
                     "messages": [
+                        {"role": "system", "content": "/no_think"},
                         {
                             "role": "user",
-                            "content": f"/no_think\n{prompt}",
+                            "content": prompt,
                             "images": [b64_image],
                         }
                     ],
                     "stream": False,
+                    "keep_alive": "30m",
                     "options": {
                         "num_ctx": 8192,
                         "num_predict": 2048,
@@ -833,8 +835,12 @@ def _try_ollama(
             payload = json.dumps(
                 {
                     "model": resolved,
-                    "messages": [{"role": "user", "content": f"/no_think\n{prompt}"}],
+                    "messages": [
+                        {"role": "system", "content": "/no_think"},
+                        {"role": "user", "content": prompt},
+                    ],
                     "stream": False,
+                    "keep_alive": "30m",
                     "options": {
                         "num_ctx": 8192,
                         "num_predict": max_tokens,
@@ -948,7 +954,7 @@ def _llm_reconstruct_page(
 
     text = _llm_chat(
         prompt,
-        max_tokens=4000,
+        max_tokens=2000,
         provider=provider,
         ollama_url=ollama_url,
         ollama_model=ollama_model,

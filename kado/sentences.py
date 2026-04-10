@@ -200,7 +200,10 @@ def _generate_via_ollama(
             payload = json.dumps(
                 {
                     "model": resolved,
-                    "messages": [{"role": "user", "content": f"/no_think\n{prompt}"}],
+                    "messages": [
+                        {"role": "system", "content": "/no_think"},
+                        {"role": "user", "content": prompt},
+                    ],
                     "stream": False,
                     "options": {
                         "num_ctx": 4096,
