@@ -802,6 +802,7 @@ def _llm_chat(
     prompt: str,
     *,
     max_tokens: int = 2000,
+    num_ctx: int = 8192,
     temperature: float = 0.1,
     provider: str = "ollama",
     ollama_url: str = "",
@@ -820,6 +821,7 @@ def _llm_chat(
         result = _try_ollama(
             prompt,
             max_tokens=max_tokens,
+            num_ctx=num_ctx,
             temperature=temperature,
             ollama_url=ollama_url,
             ollama_model=ollama_model,
@@ -900,6 +902,7 @@ def _try_ollama(
     prompt: str,
     *,
     max_tokens: int = 2000,
+    num_ctx: int = 8192,
     temperature: float = 0.1,
     ollama_url: str = "",
     ollama_model: str = "",
@@ -931,7 +934,7 @@ def _try_ollama(
                     "stream": False,
                     "keep_alive": "30m",
                     "options": {
-                        "num_ctx": 8192,
+                        "num_ctx": num_ctx,
                         "num_predict": max_tokens,
                         "temperature": temperature,
                         "think": False,
@@ -1008,9 +1011,11 @@ def _llm_reconstruct_page(
     ollama_model: str = "",
 ) -> list[VocabCard]:
     """Send one page of raw OCR text to an LLM to extract vocab entries."""
-    # Truncate very long pages to stay in token limits
-    if len(raw_text) > 4000:
-        raw_text = raw_text[:4000]
+    # Truncate to limit input tokens — OCR text is noisy and the model only
+    # needs enough context to reconstruct the vocab entries, not every line.
+    # Shorter input → smaller KV cache → faster generation on slow hardware.
+    if len(raw_text) > 1500:
+        raw_text = raw_text[:1500]
 
     prompt = (
         "Below is raw OCR text from a scanned page of a Japanese vocabulary table "
@@ -1043,7 +1048,8 @@ def _llm_reconstruct_page(
 
     text = _llm_chat(
         prompt,
-        max_tokens=2000,
+        max_tokens=800,   # ~20 entries × ~35 tokens = 700 tokens; keeps generation fast
+        num_ctx=4096,     # input ~800 tokens + output 800 = 1600 total, 4096 is plenty
         provider=provider,
         ollama_url=ollama_url,
         ollama_model=ollama_model,
