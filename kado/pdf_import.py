@@ -585,15 +585,19 @@ def _extract_via_vision(
 
 
 def _ollama_preload(*, ollama_url: str = "", model: str = "", num_ctx: int = 4096) -> None:
-    """Send a minimal request to force the model to load into VRAM.
+    """Force the model into VRAM and verify it is GPU-ready before returning.
 
-    On a cold start a 36 GB model can take 1-2 minutes to load from disk.
-    We do this once with a long timeout so that subsequent vision/LLM calls
-    hit an already-warm model and finish well within their own 600 s budget.
+    Problem: Ollama may add a model to /api/ps before GPU initialisation is
+    complete.  A 1-token response can come back via CPU fallback while the GPU
+    is still loading weights.  The next inference call then hits an unready GPU
+    and fails or stalls.
 
-    IMPORTANT: num_ctx must match what the inference call will use — Ollama
-    reloads the model if num_ctx changes between requests (different KV cache
-    allocation), which would defeat the purpose of preloading.
+    Solution: send a short but non-trivial generation (20 tokens) so Ollama
+    must actually exercise the GPU before this function returns.  Only then is
+    the model guaranteed ready for the real inference calls.
+
+    IMPORTANT: num_ctx must match the inference calls — Ollama reloads the
+    model (full evict + reload) when num_ctx changes between requests.
     """
     base_url = ollama_url or os.environ.get("KADO_OLLAMA_URL", OLLAMA_URL)
     if not model:
@@ -608,32 +612,43 @@ def _ollama_preload(*, ollama_url: str = "", model: str = "", num_ctx: int = 409
     if not resolved:
         return
 
-    # Check if already loaded with the right context size.
-    # Ollama reloads the model if num_ctx changes, so only skip preload when
-    # the model is running AND the loaded context size matches what we need.
+    # Check /api/ps: skip only if model is loaded with correct context size
+    # AND size_vram > 0 (model is on GPU, not just registered).
     try:
         req = urllib.request.Request(f"{base_url}/api/ps", method="GET")
         with urllib.request.urlopen(req, timeout=5) as resp:
             ps = json.loads(resp.read())
             for m in ps.get("models", []):
                 if m.get("name") == resolved:
-                    loaded_ctx = m.get("size_vram", 0)  # not exact, use context field
                     ctx_field = m.get("context_length", 0)
-                    if ctx_field == 0 or ctx_field >= num_ctx:
-                        debug_print(f"Model {resolved} already loaded in VRAM — skipping preload")
+                    vram = m.get("size_vram", 0)
+                    if vram > 0 and (ctx_field == 0 or ctx_field >= num_ctx):
+                        debug_print(
+                            f"Model {resolved} ready in VRAM "
+                            f"(ctx={ctx_field}, vram={vram // 1024 // 1024}MB) — skipping preload"
+                        )
                         return
-                    debug_print(f"Model {resolved} loaded with ctx={ctx_field}, need {num_ctx} — reloading")
+                    debug_print(
+                        f"Model {resolved} in ps but not ready "
+                        f"(ctx={ctx_field}, vram={vram}) — warming up"
+                    )
     except (urllib.error.URLError, OSError, json.JSONDecodeError):
         pass
 
-    debug_print(f"Pre-warming model {resolved} (loading into VRAM)...")
+    debug_print(f"Pre-warming model {resolved} with num_ctx={num_ctx} (loading into VRAM)...")
+    # Use 20 tokens — enough to force real GPU execution (not CPU fallback),
+    # guaranteeing the model is fully ready when this call returns.
+    # keep_alive=-1 pins the model until another model evicts it.
     payload = json.dumps(
         {
             "model": resolved,
-            "messages": [{"role": "user", "content": "Hi"}],
+            "messages": [
+                {"role": "system", "content": "/no_think"},
+                {"role": "user", "content": "Say: ready"},
+            ],
             "stream": False,
-            "keep_alive": "30m",
-            "options": {"num_predict": 1, "num_ctx": num_ctx, "think": False},
+            "keep_alive": -1,
+            "options": {"num_predict": 20, "num_ctx": num_ctx, "think": False},
         }
     ).encode()
     try:
@@ -644,9 +659,10 @@ def _ollama_preload(*, ollama_url: str = "", model: str = "", num_ctx: int = 409
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=1200) as resp:
-            resp.read()
-        debug_print(f"Model {resolved} loaded — proceeding with pipeline")
-    except (urllib.error.URLError, OSError) as e:
+            data = json.loads(resp.read())
+            reply = data.get("message", {}).get("content", "").strip()
+        debug_print(f"Model {resolved} GPU-ready (replied: {reply!r[:40]}) — proceeding")
+    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
         debug_print(f"Preload failed ({e}) — continuing anyway")
 
 
@@ -962,8 +978,9 @@ def _try_ollama(
                 data = json.loads(resp.read())
                 text = data.get("message", {}).get("content", "").strip()
                 if text:
-                    debug_print(f"Ollama ({resolved}): OK")
+                    debug_print(f"Ollama ({resolved}): OK ({len(text)} chars)")
                     return text
+                debug_print(f"Ollama ({resolved}): empty response — model may have timed out internally")
         except (urllib.error.URLError, OSError, json.JSONDecodeError, KeyError) as e:
             debug_print(f"Ollama model {resolved}: {e}")
             continue
