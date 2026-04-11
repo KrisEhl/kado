@@ -661,7 +661,8 @@ def _ollama_preload(*, ollama_url: str = "", model: str = "", num_ctx: int = 409
         with urllib.request.urlopen(req, timeout=1200) as resp:
             data = json.loads(resp.read())
             reply = data.get("message", {}).get("content", "").strip()
-        debug_print(f"Model {resolved} GPU-ready (replied: {reply!r[:40]}) — proceeding")
+        reply_preview = repr(reply[:40])
+        debug_print(f"Model {resolved} GPU-ready (replied: {reply_preview}) — proceeding")
     except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
         debug_print(f"Preload failed ({e}) — continuing anyway")
 
