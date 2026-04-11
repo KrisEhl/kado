@@ -97,7 +97,7 @@ def _extract_scanned(
     # without having to evict the text model first (Ollama loads one model at a time)
     if use_vision:
         if provider == "ollama" and ollama_vision_model:
-            _ollama_preload(ollama_url=ollama_url, model=ollama_vision_model)
+            _ollama_preload(ollama_url=ollama_url, model=ollama_vision_model, num_ctx=8192)
         vision_cards = _extract_via_vision(
             path, pages=pages, provider=provider, ollama_url=ollama_url,
             ollama_vision_model=ollama_vision_model,
@@ -114,7 +114,7 @@ def _extract_scanned(
     # Ollama will have evicted it and needs to reload (another potential cold-start).
     if llm_cleanup and ocr_cards is not None:
         if provider == "ollama" and ollama_model:
-            _ollama_preload(ollama_url=ollama_url, model=ollama_model)
+            _ollama_preload(ollama_url=ollama_url, model=ollama_model, num_ctx=4096)
         try:
             page_dumps = _get_raw_ocr_pages(path, pages=pages)
             llm_cards = _llm_reconstruct_from_ocr(
@@ -584,12 +584,16 @@ def _extract_via_vision(
     return all_cards
 
 
-def _ollama_preload(*, ollama_url: str = "", model: str = "") -> None:
+def _ollama_preload(*, ollama_url: str = "", model: str = "", num_ctx: int = 4096) -> None:
     """Send a minimal request to force the model to load into VRAM.
 
     On a cold start a 36 GB model can take 1-2 minutes to load from disk.
     We do this once with a long timeout so that subsequent vision/LLM calls
     hit an already-warm model and finish well within their own 600 s budget.
+
+    IMPORTANT: num_ctx must match what the inference call will use — Ollama
+    reloads the model if num_ctx changes between requests (different KV cache
+    allocation), which would defeat the purpose of preloading.
     """
     base_url = ollama_url or os.environ.get("KADO_OLLAMA_URL", OLLAMA_URL)
     if not model:
@@ -604,15 +608,21 @@ def _ollama_preload(*, ollama_url: str = "", model: str = "") -> None:
     if not resolved:
         return
 
-    # Check if already loaded — ollama /api/ps lists running models
+    # Check if already loaded with the right context size.
+    # Ollama reloads the model if num_ctx changes, so only skip preload when
+    # the model is running AND the loaded context size matches what we need.
     try:
         req = urllib.request.Request(f"{base_url}/api/ps", method="GET")
         with urllib.request.urlopen(req, timeout=5) as resp:
             ps = json.loads(resp.read())
-            running = {m.get("name", "") for m in ps.get("models", [])}
-            if resolved in running:
-                debug_print(f"Model {resolved} already loaded in VRAM — skipping preload")
-                return
+            for m in ps.get("models", []):
+                if m.get("name") == resolved:
+                    loaded_ctx = m.get("size_vram", 0)  # not exact, use context field
+                    ctx_field = m.get("context_length", 0)
+                    if ctx_field == 0 or ctx_field >= num_ctx:
+                        debug_print(f"Model {resolved} already loaded in VRAM — skipping preload")
+                        return
+                    debug_print(f"Model {resolved} loaded with ctx={ctx_field}, need {num_ctx} — reloading")
     except (urllib.error.URLError, OSError, json.JSONDecodeError):
         pass
 
@@ -623,7 +633,7 @@ def _ollama_preload(*, ollama_url: str = "", model: str = "") -> None:
             "messages": [{"role": "user", "content": "Hi"}],
             "stream": False,
             "keep_alive": "30m",
-            "options": {"num_predict": 1, "num_ctx": 512, "think": False},
+            "options": {"num_predict": 1, "num_ctx": num_ctx, "think": False},
         }
     ).encode()
     try:
@@ -1410,7 +1420,7 @@ def dump_ocr_debug(
         print(f"{'=' * 60}")
 
         if provider == "ollama" and ollama_vision_model:
-            _ollama_preload(ollama_url=ollama_url, model=ollama_vision_model)
+            _ollama_preload(ollama_url=ollama_url, model=ollama_vision_model, num_ctx=8192)
 
         vision_cards = (
             _extract_via_vision(
@@ -1442,7 +1452,7 @@ def dump_ocr_debug(
     print(f"{'=' * 60}")
 
     if provider == "ollama" and ollama_model:
-        _ollama_preload(ollama_url=ollama_url, model=ollama_model)
+        _ollama_preload(ollama_url=ollama_url, model=ollama_model, num_ctx=4096)
 
     llm_cards = (
         _llm_reconstruct_from_ocr(
