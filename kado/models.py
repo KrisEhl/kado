@@ -15,7 +15,8 @@ class VocabCard:
     part_of_speech: str = ""  # e.g. Godan verb
     example_ja: str = ""  # Japanese example sentence
     example_en: str = ""  # English translation of example
-    audio_path: str | None = None  # path to generated .mp3
+    audio_path: str | None = None          # path to word audio .mp3
+    sentence_audio_path: str | None = None  # path to example sentence audio .mp3
     tags: list[str] = field(default_factory=list)
     source: str = ""  # "ocr", "llm", "vision", "text" — how this card was extracted
 

@@ -20,6 +20,7 @@ KADO_FIELDS = [
     "ExampleJA",
     "ExampleEN",
     "Audio",
+    "ExampleAudio",
 ]
 
 CARD_FRONT_TEMPLATE = """
@@ -35,14 +36,12 @@ CARD_BACK_TEMPLATE = """
   <hr>
   <div class="meaning">{{Meaning}}</div>
   <div class="pos">{{PartOfSpeech}}</div>
+  {{#Audio}}{{Audio}}{{/Audio}}{{#ExampleAudio}}{{ExampleAudio}}{{/ExampleAudio}}
   {{#ExampleJA}}
   <hr>
   <div class="example-ja">{{ExampleJA}}</div>
   <div class="example-en">{{ExampleEN}}</div>
   {{/ExampleJA}}
-  {{#Audio}}
-  <div class="audio">{{Audio}}</div>
-  {{/Audio}}
 </div>
 """.strip()
 
@@ -52,8 +51,8 @@ CARD_CSS = """
 .reading { font-size: 28px; color: #666; }
 .meaning { font-size: 24px; margin: 10px 0; }
 .pos { font-size: 14px; color: #999; font-style: italic; }
-.example-ja { font-size: 20px; margin: 10px 0; }
-.example-en { font-size: 16px; color: #555; }
+.example-ja { font-size: 24px; margin: 10px 0; }
+.example-en { font-size: 24px; color: #555; }
 hr { border: none; border-top: 1px solid #ddd; margin: 15px 0; }
 """.strip()
 
@@ -112,22 +111,46 @@ class AnkiConnect:
     # ------------------------------------------------------------------
 
     def ensure_model(self) -> None:
-        """Create the Kado note model if it doesn't already exist."""
+        """Create the Kado note model if it doesn't exist, or migrate fields/template if it does."""
         models = self._invoke("modelNames")
-        if self.model in models:
+        if self.model not in models:
+            self._invoke(
+                "createModel",
+                modelName=self.model,
+                inOrderFields=KADO_FIELDS,
+                css=CARD_CSS,
+                cardTemplates=[
+                    {
+                        "Name": "Kado Card",
+                        "Front": CARD_FRONT_TEMPLATE,
+                        "Back": CARD_BACK_TEMPLATE,
+                    }
+                ],
+            )
             return
+
+        # Model exists — add any fields that are missing (e.g. ExampleAudio added later)
+        existing_fields = self._invoke("modelFieldNames", modelName=self.model)
+        for field in KADO_FIELDS:
+            if field not in existing_fields:
+                self._invoke("modelFieldAdd", modelName=self.model, fieldName=field)
+
+        # Keep the card template and CSS up to date
         self._invoke(
-            "createModel",
-            modelName=self.model,
-            inOrderFields=KADO_FIELDS,
-            css=CARD_CSS,
-            cardTemplates=[
-                {
-                    "Name": "Kado Card",
-                    "Front": CARD_FRONT_TEMPLATE,
-                    "Back": CARD_BACK_TEMPLATE,
-                }
-            ],
+            "updateModelTemplates",
+            model={
+                "name": self.model,
+                "templates": {
+                    "Kado Card": {
+                        "Front": CARD_FRONT_TEMPLATE,
+                        "Back": CARD_BACK_TEMPLATE,
+                    }
+                },
+            },
+        )
+        self._invoke(
+            "updateModelStyling",
+            model={"name": self.model, "css": CARD_CSS},
         )
 
     def ensure_deck(self) -> None:
@@ -169,6 +192,14 @@ class AnkiConnect:
             self._invoke(
                 "updateNoteFields",
                 note={"id": note_id, "fields": {"Audio": f"[sound:{filename}]"}},
+            )
+
+        if card.sentence_audio_path and Path(card.sentence_audio_path).exists():
+            filename = Path(card.sentence_audio_path).name
+            self._invoke("storeMediaFile", filename=filename, path=str(card.sentence_audio_path))
+            self._invoke(
+                "updateNoteFields",
+                note={"id": note_id, "fields": {"ExampleAudio": f"[sound:{filename}]"}},
             )
 
         return note_id
@@ -232,6 +263,14 @@ class AnkiConnect:
                 note={"id": note_id, "fields": {"Audio": f"[sound:{filename}]"}},
             )
             self._invoke("storeMediaFile", filename=filename, path=str(card.audio_path))
+
+        if card.sentence_audio_path and Path(card.sentence_audio_path).exists():
+            filename = Path(card.sentence_audio_path).name
+            self._invoke(
+                "updateNoteFields",
+                note={"id": note_id, "fields": {"ExampleAudio": f"[sound:{filename}]"}},
+            )
+            self._invoke("storeMediaFile", filename=filename, path=str(card.sentence_audio_path))
 
         # Update tags
         if card.tags:

@@ -20,6 +20,8 @@ connect-cluster:
 cluster-configure:
 	uv run kado config --set ollama-url http://localhost:11435
 
+audio-server:
+	docker run -d --rm -p 50021:50021 voicevox/voicevox_engine:cpu-latest
 #Or run kado status to verify after the tunnel is up — it will show the installed models on the cluster.
 
 # To make the tunnel persistent/auto-start, add this to ~/.ssh/config:

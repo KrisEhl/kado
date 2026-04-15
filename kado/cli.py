@@ -128,10 +128,15 @@ def add(
     if not no_audio and cfg.audio_enabled:
         with Console().status("[bold]🔊 Generating audio (gTTS)...[/bold]"):
             try:
-                card.audio_path = generate_audio(card.word, lang=cfg.audio_lang)
+                card.audio_path = generate_audio(card.word, lang=cfg.audio_lang, voicevox_url=cfg.voicevox_url, voicevox_speaker=cfg.voicevox_speaker)
             except Exception as e:
                 card.audio_path = None
                 rprint(f"   [yellow]⚠ Audio failed: {e}[/yellow]")
+            if card.example_ja:
+                try:
+                    card.sentence_audio_path = generate_audio(card.example_ja, lang=cfg.audio_lang, voicevox_url=cfg.voicevox_url, voicevox_speaker=cfg.voicevox_speaker)
+                except Exception:
+                    pass
         if card.audio_path:
             rprint("   [green]✓[/green] Audio saved [dim](gTTS)[/dim]")
 
@@ -248,6 +253,9 @@ def import_pdf(
     no_llm_cleanup: bool = typer.Option(
         False, "--no-llm-cleanup", help="Skip LLM cleanup of noisy OCR results"
     ),
+    no_llm_only: bool = typer.Option(
+        False, "--no-llm-only", help="Exclude words found only by LLM reconstruction (not confirmed by OCR or vision)"
+    ),
     pages: Optional[str] = typer.Option(
         None,
         "--pages",
@@ -312,6 +320,13 @@ def import_pdf(
             ollama_model=cfg.ollama_model,
             ollama_vision_model=cfg.ollama_vision_model,
         )
+
+    if no_llm_only:
+        before = len(cards)
+        cards = [c for c in cards if c.source != "llm"]
+        dropped = before - len(cards)
+        if dropped:
+            rprint(f"   [dim]--no-llm-only: dropped {dropped} LLM-only word{'s' if dropped != 1 else ''}[/dim]")
 
     if not cards:
         rprint("[red]✗ No vocabulary found in the PDF.[/red]")
@@ -434,9 +449,14 @@ def import_pdf(
         # Audio
         if not no_audio and cfg.audio_enabled:
             try:
-                card.audio_path = generate_audio(card.word)
+                card.audio_path = generate_audio(card.word, voicevox_url=cfg.voicevox_url, voicevox_speaker=cfg.voicevox_speaker)
             except Exception:
                 pass
+            if card.example_ja:
+                try:
+                    card.sentence_audio_path = generate_audio(card.example_ja, voicevox_url=cfg.voicevox_url, voicevox_speaker=cfg.voicevox_speaker)
+                except Exception:
+                    pass
 
         # Add or update
         try:
@@ -673,9 +693,17 @@ def status():
     elif prov == "ollama":
         rprint("  Vision model:        [dim]unknown (Ollama not reachable)[/dim]")
 
-    rprint(
-        f"  Audio generation:    {'[green]gTTS[/green]' if cfg.audio_enabled else '[dim]disabled[/dim]'}"
-    )
+    if cfg.audio_enabled:
+        from kado.audio import voicevox_available
+        if cfg.voicevox_url:
+            if voicevox_available(cfg.voicevox_url):
+                rprint(f"  Audio generation:    [green]VOICEVOX[/green] [dim](speaker {cfg.voicevox_speaker}, {cfg.voicevox_url})[/dim]")
+            else:
+                rprint(f"  Audio generation:    [yellow]VOICEVOX configured but not reachable[/yellow] [dim]({cfg.voicevox_url}) — falling back to gTTS[/dim]")
+        else:
+            rprint("  Audio generation:    [green]gTTS[/green]")
+    else:
+        rprint("  Audio generation:    [dim]disabled[/dim]")
 
 
 # ── export ───────────────────────────────────────────────────────────
@@ -714,7 +742,11 @@ def _print_card_preview(card) -> None:
         lines.append(f"\n[italic]{card.example_ja}[/italic]")
         lines.append(f"[dim]{card.example_en}[/dim]")
     if card.audio_path:
-        lines.append(f"\n🔊 [dim]{card.audio_path}[/dim]")
+        url = Path(card.audio_path).as_uri()
+        lines.append(f"\n[link={url}]🔊 word[/link]")
+    if card.sentence_audio_path:
+        url = Path(card.sentence_audio_path).as_uri()
+        lines.append(f"[link={url}]🔊 sentence[/link]")
     if card.tags:
         lines.append(f"\n[dim]tags: {', '.join(card.tags)}[/dim]")
 

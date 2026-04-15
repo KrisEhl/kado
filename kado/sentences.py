@@ -200,16 +200,13 @@ def _generate_via_ollama(
             payload = json.dumps(
                 {
                     "model": resolved,
-                    "messages": [
-                        {"role": "system", "content": "/no_think"},
-                        {"role": "user", "content": prompt},
-                    ],
+                    "messages": [{"role": "user", "content": prompt}],
                     "stream": False,
+                    "think": False,
                     "options": {
                         "num_ctx": 4096,
                         "num_predict": 200,
                         "temperature": 0.7,
-                        "think": False,
                     },
                 }
             ).encode()

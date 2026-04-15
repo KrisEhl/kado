@@ -154,6 +154,12 @@ def _merge_sources(
       - "llm" if only LLM found it
       - "ocr" if only OCR found it
     """
+    # Save original German meanings before translation so we can match against them later
+    # (OCR card meanings stay in German; translated English meanings won't substring-match)
+    vision_original_meanings: set[str] = {
+        c.meaning.lower() for c in vision_cards if c.meaning and len(c.meaning) > 5
+    }
+
     # Translate vision German meanings to English before merging
     if vision_cards:
         vision_cards = _llm_translate_vision_cards(
@@ -194,6 +200,21 @@ def _merge_sources(
         merged_words.add(card.word)
         merged.append(card)
 
+    # Accepted meanings after pass 1: translated English + original German.
+    # Both are needed because OCR card meanings stay in German.
+    # Normalize by collapsing hyphens/spaces so "tortoise shell" ≈ "tortoiseshell".
+    def _norm_meaning(m: str) -> str:
+        return re.sub(r"[\s\-]+", "", m.lower())
+
+    accepted_norm: set[str] = {
+        _norm_meaning(c.meaning) for c in merged if c.meaning and len(c.meaning) > 5
+    } | {_norm_meaning(m) for m in vision_original_meanings if len(m) > 5}
+
+    def _meaning_overlaps(candidate: str) -> bool:
+        """Return True if candidate overlaps with any accepted meaning via normalized substring."""
+        cn = _norm_meaning(candidate)
+        return any(an in cn or cn in an for an in accepted_norm if len(an) > 5)
+
     # Pass 2: LLM cards — clean English meanings
     for card in llm_cards:
         if not card.word:
@@ -207,11 +228,18 @@ def _merge_sources(
         if any(norm in w and len(w) > len(norm) for w in merged_words):
             debug_print(f"LLM: discarding '{norm}' — substring of already-accepted word")
             continue
+        # Skip if meaning already covered by vision (handles hallucinations like 亀甲 vs べっ甲)
+        if card.meaning and _meaning_overlaps(card.meaning):
+            debug_print(f"LLM: discarding '{norm}' — meaning overlaps with vision card")
+            continue
         card.word = norm
         card.reading = _clean_reading(card.reading)
         card.source = "ocr" if key in ocr_norm else "llm"
         seen.add(key)
         merged_words.add(norm)
+        # Update accepted meanings as we add LLM cards
+        if card.meaning and len(card.meaning) > 5:
+            accepted_norm.add(_norm_meaning(card.meaning))
         merged.append(card)
 
     # Pass 3: OCR-only cards — clean up with LLM before including
@@ -241,6 +269,12 @@ def _merge_sources(
                 continue
             if _is_garbage_meaning(card.meaning):
                 debug_print(f"OCR: discarding '{card.word}' — garbage meaning after LLM cleanup")
+                continue
+            # Drop OCR card if its meaning overlaps with an already-accepted entry.
+            # Normalises hyphens/spaces and checks both English and original German meanings,
+            # so "Masters-Golf-Turnier I 3 Fleischpastete" is caught even after translation.
+            if card.meaning and _meaning_overlaps(card.meaning):
+                debug_print(f"OCR: discarding '{card.word}' — meaning overlaps with accepted card")
                 continue
             seen.add(key)
             merged_words.add(card.word)
@@ -642,13 +676,11 @@ def _ollama_preload(*, ollama_url: str = "", model: str = "", num_ctx: int = 409
     payload = json.dumps(
         {
             "model": resolved,
-            "messages": [
-                {"role": "system", "content": "/no_think"},
-                {"role": "user", "content": "Say: ready"},
-            ],
+            "messages": [{"role": "user", "content": "Say: ready"}],
             "stream": False,
             "keep_alive": -1,
-            "options": {"num_predict": 20, "num_ctx": num_ctx, "think": False},
+            "think": False,
+            "options": {"num_predict": 20, "num_ctx": num_ctx},
         }
     ).encode()
     try:
@@ -711,7 +743,6 @@ def _try_ollama_vision(
                 {
                     "model": resolved,
                     "messages": [
-                        {"role": "system", "content": "/no_think"},
                         {
                             "role": "user",
                             "content": prompt,
@@ -720,11 +751,11 @@ def _try_ollama_vision(
                     ],
                     "stream": False,
                     "keep_alive": "30m",
+                    "think": False,
                     "options": {
                         "num_ctx": 8192,
                         "num_predict": 2048,
                         "temperature": 0.1,
-                        "think": False,
                     },
                 }
             ).encode()
@@ -954,17 +985,14 @@ def _try_ollama(
             payload = json.dumps(
                 {
                     "model": resolved,
-                    "messages": [
-                        {"role": "system", "content": "/no_think"},
-                        {"role": "user", "content": prompt},
-                    ],
+                    "messages": [{"role": "user", "content": prompt}],
                     "stream": False,
                     "keep_alive": "30m",
+                    "think": False,
                     "options": {
                         "num_ctx": num_ctx,
                         "num_predict": max_tokens,
                         "temperature": temperature,
-                        "think": False,
                     },
                 }
             ).encode()

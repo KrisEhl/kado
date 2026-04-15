@@ -12,13 +12,16 @@ OLLAMA_URL = "http://localhost:11434"
 # Vision models tried in order of preference when auto-selecting.
 # Override with KADO_OLLAMA_VISION_MODEL env var to pin a specific model.
 OLLAMA_VISION_MODELS = [
+    "qwen3-vl:8b",          # ~11GB Q4, 32-lang OCR, 256K ctx
+    "glm-ocr",              # ~2-4GB, #1 OmniDocBench, Japanese support
+    "deepseek-ocr:3b",      # ~6-8GB, 100+ langs, confirmed Japanese
     "qwen2.5vl:72b",
-    "qwen2.5vl:7b",
+    "qwen2.5vl:7b",         # good OCR but VRAM-heavy in Ollama (~15GB at Q4)
+    "minicpm-v",
     "llama3.2-vision:11b",
     "llava:34b",
     "llava:13b",
     "llava:7b",
-    "minicpm-v",
 ]
 
 

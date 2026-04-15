@@ -32,6 +32,8 @@ class KadoConfig:
     ollama_vision_model: str = ""  # empty = auto-select from OLLAMA_VISION_MODELS
     audio_enabled: bool = True
     audio_lang: str = "ja"
+    voicevox_url: str = ""        # empty = disabled, use gTTS fallback
+    voicevox_speaker: int = 1     # VOICEVOX speaker ID (1 = ずんだもん normal)
 
     @classmethod
     def load(cls) -> KadoConfig:
@@ -54,6 +56,8 @@ class KadoConfig:
             audio = data.get("audio", {})
             cfg.audio_enabled = audio.get("enabled", cfg.audio_enabled)
             cfg.audio_lang = audio.get("lang", cfg.audio_lang)
+            cfg.voicevox_url = audio.get("voicevox_url", cfg.voicevox_url)
+            cfg.voicevox_speaker = audio.get("voicevox_speaker", cfg.voicevox_speaker)
 
         return cfg
 
@@ -78,6 +82,8 @@ class KadoConfig:
             "audio": {
                 "enabled": self.audio_enabled,
                 "lang": self.audio_lang,
+                "voicevox_url": self.voicevox_url,
+                "voicevox_speaker": self.voicevox_speaker,
             },
         }
 
