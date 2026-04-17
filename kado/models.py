@@ -30,3 +30,18 @@ class VocabCard:
     @property
     def has_example(self) -> bool:
         return bool(self.example_ja)
+
+
+@dataclass
+class GrammarCard:
+    """A Japanese grammar point card."""
+
+    pattern: str               # e.g. ～そうです
+    meaning: str               # e.g. Looks like ~; seems ~
+    formation: str             # Formation rules (plain text, one rule per line)
+    note: str = ""             # Nuances, exceptions, contrasts
+    jlpt: str = ""             # e.g. N4
+    # Up to 4 examples (verb / i-adj / na-adj / noun), (ja, en) pairs
+    examples: list[tuple[str, str]] = field(default_factory=list)
+    example_audio_paths: list[str | None] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)

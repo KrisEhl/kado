@@ -9,7 +9,7 @@ import json
 import urllib.request
 
 from kado.config import KadoConfig
-from kado.models import VocabCard
+from kado.models import GrammarCard, VocabCard
 
 # Kado note model field definitions
 KADO_FIELDS = [
@@ -54,6 +54,94 @@ CARD_CSS = """
 .example-ja { font-size: 24px; margin: 10px 0; }
 .example-en { font-size: 24px; color: #555; }
 hr { border: none; border-top: 1px solid #ddd; margin: 15px 0; }
+""".strip()
+
+
+GRAMMAR_MODEL_NAME = "Kado-Grammar"
+
+GRAMMAR_FIELDS = [
+    "Pattern",
+    "Meaning",
+    "Formation",
+    "Note",
+    "JLPT",
+    "Example1JA", "Example1EN", "Example1Audio",
+    "Example2JA", "Example2EN", "Example2Audio",
+    "Example3JA", "Example3EN", "Example3Audio",
+    "Example4JA", "Example4EN", "Example4Audio",
+]
+
+# JS picks the same example on front and back using a daily seed keyed on the pattern.
+_GRAMMAR_EXAMPLE_JS = """
+<script>
+(function() {
+  var items = document.querySelectorAll('.ex-item');
+  if (!items.length) return;
+  var seed = '{{Pattern}}' + new Date().toDateString();
+  var h = 0;
+  for (var i = 0; i < seed.length; i++) {
+    h = Math.imul(31, h) + seed.charCodeAt(i) | 0;
+  }
+  var item = items[Math.abs(h) % items.length];
+  var jaEl = document.getElementById('ex-ja');
+  if (jaEl) jaEl.textContent = item.dataset.ja;
+  var enEl = document.getElementById('ex-en');
+  if (enEl) enEl.textContent = item.dataset.en;
+  var fname = item.dataset.audio;
+  if (fname) { try { new Audio(fname).play(); } catch(e) {} }
+})();
+</script>
+""".strip()
+
+# Hidden data store — Anki processes {{...}} before JS runs
+_GRAMMAR_EXAMPLE_DATA = """
+<div style="display:none">
+{{#Example1JA}}<span class="ex-item" data-ja="{{Example1JA}}" data-en="{{Example1EN}}" data-audio="{{Example1Audio}}"></span>{{/Example1JA}}
+{{#Example2JA}}<span class="ex-item" data-ja="{{Example2JA}}" data-en="{{Example2EN}}" data-audio="{{Example2Audio}}"></span>{{/Example2JA}}
+{{#Example3JA}}<span class="ex-item" data-ja="{{Example3JA}}" data-en="{{Example3EN}}" data-audio="{{Example3Audio}}"></span>{{/Example3JA}}
+{{#Example4JA}}<span class="ex-item" data-ja="{{Example4JA}}" data-en="{{Example4EN}}" data-audio="{{Example4Audio}}"></span>{{/Example4JA}}
+</div>
+""".strip()
+
+GRAMMAR_FRONT_TEMPLATE = f"""
+<div class="card front">
+  <div id="ex-ja" class="example-ja"></div>
+</div>
+{_GRAMMAR_EXAMPLE_DATA}
+{_GRAMMAR_EXAMPLE_JS}
+""".strip()
+
+GRAMMAR_BACK_TEMPLATE = f"""
+<div class="card back">
+  <div id="ex-ja" class="example-ja"></div>
+  <div id="ex-en" class="example-en"></div>
+  <hr>
+  <div class="pattern">{{{{Pattern}}}}</div>
+  <div class="meaning">{{{{Meaning}}}}</div>
+  {{{{#Note}}}}<div class="note">{{{{Note}}}}</div>{{{{/Note}}}}
+  {{{{#JLPT}}}}<div class="jlpt">{{{{JLPT}}}}</div>{{{{/JLPT}}}}
+  <hr>
+  <div class="formation">{{{{Formation}}}}</div>
+</div>
+{_GRAMMAR_EXAMPLE_DATA}
+{_GRAMMAR_EXAMPLE_JS}
+""".strip()
+
+GRAMMAR_CSS = """
+.card { font-family: "Hiragino Sans", "Yu Gothic", "Noto Sans JP", sans-serif; text-align: center; padding: 20px; }
+.pattern { font-size: 36px; font-weight: bold; margin: 10px 0; }
+.meaning { font-size: 24px; margin: 8px 0; }
+.note { font-size: 16px; color: #e67e22; font-style: italic; margin: 6px 0; }
+.jlpt { font-size: 13px; color: #999; margin: 4px 0; }
+.formation { font-size: 16px; text-align: left; display: inline-block; margin: 10px auto; border-collapse: collapse; }
+.formation td { padding: 4px 12px; vertical-align: top; }
+.ftype { font-weight: bold; color: #444; white-space: nowrap; }
+.fex { font-size: 18px; }
+.ftrans { color: #777; }
+.fnote { color: #e67e22; font-style: italic; }
+.example-ja { font-size: 28px; margin: 16px 0 4px; }
+.example-en { font-size: 20px; color: #555; margin-bottom: 10px; }
+hr { border: none; border-top: 1px solid #ddd; margin: 12px 0; }
 """.strip()
 
 
@@ -275,6 +363,101 @@ class AnkiConnect:
         # Update tags
         if card.tags:
             self._invoke("addTags", notes=[note_id], tags=" ".join(card.tags))
+
+        return note_id
+
+    # ------------------------------------------------------------------
+    # Grammar cards
+    # ------------------------------------------------------------------
+
+    def ensure_grammar_model(self) -> None:
+        """Create or migrate the Kado-Grammar note type."""
+        models = self._invoke("modelNames")
+        if GRAMMAR_MODEL_NAME not in models:
+            self._invoke(
+                "createModel",
+                modelName=GRAMMAR_MODEL_NAME,
+                inOrderFields=GRAMMAR_FIELDS,
+                css=GRAMMAR_CSS,
+                cardTemplates=[
+                    {
+                        "Name": "Grammar Card",
+                        "Front": GRAMMAR_FRONT_TEMPLATE,
+                        "Back": GRAMMAR_BACK_TEMPLATE,
+                    }
+                ],
+            )
+            return
+
+        existing_fields = self._invoke("modelFieldNames", modelName=GRAMMAR_MODEL_NAME)
+        for f in GRAMMAR_FIELDS:
+            if f not in existing_fields:
+                self._invoke("modelFieldAdd", modelName=GRAMMAR_MODEL_NAME, fieldName=f)
+
+        self._invoke(
+            "updateModelTemplates",
+            model={
+                "name": GRAMMAR_MODEL_NAME,
+                "templates": {
+                    "Grammar Card": {
+                        "Front": GRAMMAR_FRONT_TEMPLATE,
+                        "Back": GRAMMAR_BACK_TEMPLATE,
+                    }
+                },
+            },
+        )
+        self._invoke(
+            "updateModelStyling",
+            model={"name": GRAMMAR_MODEL_NAME, "css": GRAMMAR_CSS},
+        )
+
+    def find_grammar_pattern(self, pattern: str) -> int | None:
+        """Return the note ID for a grammar pattern, or None if not found."""
+        escaped = pattern.replace('"', '\\"')
+        query = f'"deck:{self.deck}" "note:{GRAMMAR_MODEL_NAME}" Pattern:"{escaped}"'
+        ids = self._invoke("findNotes", query=query)
+        return ids[0] if ids else None
+
+    def has_grammar_pattern(self, pattern: str) -> bool:
+        """Check if a grammar pattern already exists in the deck."""
+        return self.find_grammar_pattern(pattern) is not None
+
+    def add_grammar_card(self, card: GrammarCard) -> int:
+        """Add a GrammarCard to Anki. Returns the new note ID."""
+        examples = card.examples[:4]  # cap at 4
+        audios = card.example_audio_paths[:4]
+
+        fields: dict[str, str] = {
+            "Pattern": card.pattern,
+            "Meaning": card.meaning,
+            "Formation": card.formation,
+            "Note": card.note,
+            "JLPT": card.jlpt,
+        }
+        for i, (ja, en) in enumerate(examples, 1):
+            fields[f"Example{i}JA"] = ja
+            fields[f"Example{i}EN"] = en
+
+        note = {
+            "deckName": self.deck,
+            "modelName": GRAMMAR_MODEL_NAME,
+            "fields": fields,
+            "tags": card.tags or [],
+            "options": {"allowDuplicate": False},
+        }
+        note_id = self._invoke("addNote", note=note)
+
+        for i, audio_path in enumerate(audios, 1):
+            if audio_path and Path(audio_path).exists():
+                filename = Path(audio_path).name
+                self._invoke("storeMediaFile", filename=filename, path=str(audio_path))
+                # Store just the filename — JS plays it via new Audio(filename).
+                # Do NOT use [sound:...] here: Anki auto-plays every [sound:] tag
+                # it finds in the rendered HTML, which would play all examples at once.
+                self._invoke(
+                    "updateNoteFields",
+                    note={"id": note_id, "fields": {f"Example{i}Audio": filename}},
+                )
 
         return note_id
 

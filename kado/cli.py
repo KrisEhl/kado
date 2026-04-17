@@ -480,6 +480,109 @@ def import_pdf(
     )
 
 
+# ── grammar ──────────────────────────────────────────────────────────
+
+
+@app.command("grammar")
+def grammar_add(
+    pattern: str = typer.Argument(help="Grammar pattern to add (e.g. '～そうです')"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview without adding to Anki"),
+    overwrite: bool = typer.Option(False, "--overwrite", "-w", help="Overwrite if pattern already exists"),
+    no_audio: bool = typer.Option(False, "--no-audio", help="Skip audio generation"),
+    tag: Optional[list[str]] = typer.Option(None, "--tag", "-t", help="Extra tags"),
+    provider: Optional[str] = typer.Option(None, "--provider", help="LLM provider"),
+    debug: bool = typer.Option(False, "--debug", help="Show debug output"),
+):
+    """Generate and add a Japanese grammar point card to Anki."""
+    from kado.anki import AnkiConnect, AnkiConnectError
+    from kado.audio import generate_audio
+    from kado.grammar import generate_grammar_card
+
+    set_debug(debug)
+    cfg = KadoConfig.load()
+    active_provider = provider or cfg.sentence_provider
+
+    rprint(f"[bold]📖 Generating grammar card for [cyan]{pattern}[/cyan]...[/bold]")
+
+    card = generate_grammar_card(
+        pattern,
+        provider=active_provider,
+        ollama_url=cfg.ollama_url,
+        ollama_model=cfg.ollama_model,
+    )
+    if not card:
+        rprint("[red]✗ Failed to generate grammar info. Is the LLM running?[/red]")
+        raise typer.Exit(1)
+
+    if tag:
+        card.tags.extend(tag)
+    if card.jlpt and f"jlpt-{card.jlpt.lower()}" not in card.tags:
+        card.tags.append(f"jlpt-{card.jlpt.lower()}")
+    card.tags.append("grammar")
+
+    # Audio for each example sentence
+    if not no_audio and cfg.audio_enabled:
+        for ja, _en in card.examples:
+            try:
+                path = generate_audio(
+                    ja,
+                    voicevox_url=cfg.voicevox_url,
+                    voicevox_speaker=cfg.voicevox_speaker,
+                )
+                card.example_audio_paths.append(path)
+            except Exception:
+                card.example_audio_paths.append(None)
+
+    # Preview
+    rprint(f"\n  [bold]{card.pattern}[/bold]  {card.meaning}")
+    if card.jlpt:
+        rprint(f"  [dim]{card.jlpt}[/dim]")
+    if card.note:
+        rprint(f"  [yellow]⚠ {card.note}[/yellow]")
+    rprint("\n  [dim]Formation:[/dim]")
+    for line in card.formation.splitlines():
+        rprint(f"    {line}")
+    rprint("\n  [dim]Examples:[/dim]")
+    for i, (ja, en) in enumerate(card.examples, 1):
+        audio_path = card.example_audio_paths[i - 1] if i <= len(card.example_audio_paths) else None
+        if audio_path:
+            url = Path(audio_path).as_uri()
+            rprint(f"    {ja}  [link={url}]🔊[/link]")
+        else:
+            rprint(f"    {ja}")
+        rprint(f"    [dim]{en}[/dim]")
+    rprint()
+
+    if dry_run:
+        rprint("[dim]Dry run — not added to Anki.[/dim]")
+        return
+
+    anki = AnkiConnect(cfg)
+    if not anki.ping():
+        rprint("[red]✗ Cannot reach AnkiConnect. Is Anki running?[/red]")
+        raise typer.Exit(1)
+
+    existing_id = anki.find_grammar_pattern(pattern)
+    if existing_id:
+        if not overwrite:
+            rprint(f"[yellow]⚠ '{pattern}' already exists in deck.[/yellow]")
+            if not typer.confirm("Overwrite?", default=False):
+                return
+        anki._invoke("deleteNotes", notes=[existing_id])
+
+    try:
+        anki.ensure_deck()
+        anki.ensure_grammar_model()
+        note_id = anki.add_grammar_card(card)
+        if not note_id:
+            rprint("[red]✗ Anki returned no note ID — card may not have been created.[/red]")
+            raise typer.Exit(1)
+        rprint(f"[green]✓[/green] {'Replaced' if existing_id else 'Added'} grammar card (note {note_id})")
+    except AnkiConnectError as e:
+        rprint(f"[red]✗ Anki error: {e}[/red]")
+        raise typer.Exit(1)
+
+
 # ── lookup ───────────────────────────────────────────────────────────
 
 
@@ -704,6 +807,16 @@ def status():
             rprint("  Audio generation:    [green]gTTS[/green]")
     else:
         rprint("  Audio generation:    [dim]disabled[/dim]")
+
+    rprint(f"\n[bold]Config[/bold] [dim]({CONFIG_PATH})[/dim]")
+    rprint(f"  Anki URL:            {cfg.anki_url}")
+    rprint(f"  Deck:                {cfg.anki_deck}")
+    rprint(f"  Note type:           {cfg.anki_model}")
+    rprint(f"  Ollama URL:          {cfg.ollama_url}")
+    rprint(f"  Text model:          {cfg.ollama_model or '(auto)'}")
+    rprint(f"  Vision model:        {cfg.ollama_vision_model or '(auto)'}")
+    rprint(f"  VOICEVOX URL:        {cfg.voicevox_url or '(disabled)'}")
+    rprint(f"  VOICEVOX speaker:    {cfg.voicevox_speaker}")
 
 
 # ── export ───────────────────────────────────────────────────────────
