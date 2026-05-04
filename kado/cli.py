@@ -256,6 +256,9 @@ def import_pdf(
     no_llm_only: bool = typer.Option(
         False, "--no-llm-only", help="Exclude words found only by LLM reconstruction (not confirmed by OCR or vision)"
     ),
+    no_ocr: bool = typer.Option(
+        False, "--no-ocr", help="Exclude words found by OCR (use only vision and LLM sources)"
+    ),
     pages: Optional[str] = typer.Option(
         None,
         "--pages",
@@ -327,6 +330,13 @@ def import_pdf(
         dropped = before - len(cards)
         if dropped:
             rprint(f"   [dim]--no-llm-only: dropped {dropped} LLM-only word{'s' if dropped != 1 else ''}[/dim]")
+
+    if no_ocr:
+        before = len(cards)
+        cards = [c for c in cards if c.source != "ocr"]
+        dropped = before - len(cards)
+        if dropped:
+            rprint(f"   [dim]--no-ocr: dropped {dropped} OCR word{'s' if dropped != 1 else ''}[/dim]")
 
     if not cards:
         rprint("[red]✗ No vocabulary found in the PDF.[/red]")
