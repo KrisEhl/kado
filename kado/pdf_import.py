@@ -387,33 +387,27 @@ def _llm_translate_vision_cards(
             return cards
         data = json.loads(match.group())
 
+        # Translation maps input cards to output by id, updating only the
+        # meaning. It must never add or drop cards: entries with an unknown id
+        # are ignored (e.g. the model echoing the prompt's example), and any
+        # original not returned is kept as-is.
         result: list[VocabCard] = []
+        translated_ids: set[int] = set()
         for entry in data:
             if not isinstance(entry, dict):
                 continue
             idx = entry.get("id", -1)
+            if not isinstance(idx, int) or not (0 <= idx < len(cards)) or idx in translated_ids:
+                continue
+            card = cards[idx]
             meaning = str(entry.get("meaning", "")).strip()
-            if 0 <= idx < len(cards):
-                card = cards[idx]
-                if meaning:
-                    card.meaning = meaning
-                result.append(card)
-            else:
-                word = str(entry.get("word", "")).strip()
-                reading = str(entry.get("reading", "")).strip()
-                if word and meaning:
-                    result.append(
-                        VocabCard(
-                            word=word, reading=reading, meaning=meaning, source="vision"
-                        )
-                    )
+            if meaning:
+                card.meaning = meaning
+            translated_ids.add(idx)
+            result.append(card)
 
-        # Return translated cards + any originals not in response
-        returned_ids = {
-            entry.get("id", -1) for entry in data if isinstance(entry, dict)
-        }
         for i, c in enumerate(cards):
-            if i not in returned_ids:
+            if i not in translated_ids:
                 result.append(c)
         return result
     except (json.JSONDecodeError, KeyError):

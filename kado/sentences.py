@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -272,16 +273,24 @@ def _generate_via_hf(
 # ── Shared helpers ─────────────────────────────────────────────────
 
 
+# Leading label/bullet a model may prepend to each line, e.g. "Line 1:",
+# "- Line 1:", "1.", "Japanese:", "English:". A label is only stripped when
+# followed by its separator, so a real sentence like "Japanese people..." is
+# left intact. Plain lines lose only a leading bullet/whitespace.
+_LINE_PREFIX_RE = re.compile(
+    r"^\s*[-*•]*\s*"
+    r"(?:line\s*\d+\s*:|japanese\s*:|english\s*:|\d+\s*[.):])?"
+    r"\s*",
+    re.IGNORECASE,
+)
+
+
 def _parse_response(text: str) -> tuple[str, str]:
     """Extract Japanese sentence and English translation from model output."""
     lines = [line.strip() for line in text.strip().split("\n") if line.strip()]
 
-    cleaned = []
-    for line in lines:
-        for prefix in ("1.", "2.", "Line 1:", "Line 2:", "Japanese:", "English:", "- "):
-            if line.startswith(prefix):
-                line = line[len(prefix) :].strip()
-        cleaned.append(line)
+    cleaned = [_LINE_PREFIX_RE.sub("", line).strip() for line in lines]
+    cleaned = [line for line in cleaned if line]
 
     if len(cleaned) >= 2:
         return cleaned[0], cleaned[1]

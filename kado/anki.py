@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import base64
 import json
 import urllib.request
 
@@ -186,6 +187,20 @@ class AnkiConnect:
             raise AnkiConnectError(body["error"])
         return body.get("result")
 
+    def _store_media_file(self, file_path: str | Path) -> str:
+        """Upload a local media file to Anki's collection by its content.
+
+        Sends the file as base64 ``data`` rather than a ``path`` so it works
+        even when Anki runs on a different host than kado (e.g. Anki on the
+        Windows host while kado runs under WSL2), where a local filesystem
+        path would not resolve for Anki. Returns the stored filename.
+        """
+        path = Path(file_path)
+        filename = path.name
+        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        self._invoke("storeMediaFile", filename=filename, data=encoded)
+        return filename
+
     # ------------------------------------------------------------------
     # Deck discovery
     # ------------------------------------------------------------------
@@ -275,16 +290,14 @@ class AnkiConnect:
 
         # Store audio file separately and reference it in the Audio field
         if card.audio_path and Path(card.audio_path).exists():
-            filename = Path(card.audio_path).name
-            self._invoke("storeMediaFile", filename=filename, path=str(card.audio_path))
+            filename = self._store_media_file(card.audio_path)
             self._invoke(
                 "updateNoteFields",
                 note={"id": note_id, "fields": {"Audio": f"[sound:{filename}]"}},
             )
 
         if card.sentence_audio_path and Path(card.sentence_audio_path).exists():
-            filename = Path(card.sentence_audio_path).name
-            self._invoke("storeMediaFile", filename=filename, path=str(card.sentence_audio_path))
+            filename = self._store_media_file(card.sentence_audio_path)
             self._invoke(
                 "updateNoteFields",
                 note={"id": note_id, "fields": {"ExampleAudio": f"[sound:{filename}]"}},
@@ -345,20 +358,18 @@ class AnkiConnect:
 
         # Update audio separately if we have a file
         if card.audio_path and Path(card.audio_path).exists():
-            filename = Path(card.audio_path).name
+            filename = self._store_media_file(card.audio_path)
             self._invoke(
                 "updateNoteFields",
                 note={"id": note_id, "fields": {"Audio": f"[sound:{filename}]"}},
             )
-            self._invoke("storeMediaFile", filename=filename, path=str(card.audio_path))
 
         if card.sentence_audio_path and Path(card.sentence_audio_path).exists():
-            filename = Path(card.sentence_audio_path).name
+            filename = self._store_media_file(card.sentence_audio_path)
             self._invoke(
                 "updateNoteFields",
                 note={"id": note_id, "fields": {"ExampleAudio": f"[sound:{filename}]"}},
             )
-            self._invoke("storeMediaFile", filename=filename, path=str(card.sentence_audio_path))
 
         # Update tags
         if card.tags:
@@ -449,8 +460,7 @@ class AnkiConnect:
 
         for i, audio_path in enumerate(audios, 1):
             if audio_path and Path(audio_path).exists():
-                filename = Path(audio_path).name
-                self._invoke("storeMediaFile", filename=filename, path=str(audio_path))
+                filename = self._store_media_file(audio_path)
                 # Store just the filename — JS plays it via new Audio(filename).
                 # Do NOT use [sound:...] here: Anki auto-plays every [sound:] tag
                 # it finds in the rendered HTML, which would play all examples at once.

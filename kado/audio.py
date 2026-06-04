@@ -44,6 +44,14 @@ def generate_audio(
     return _generate_gtts(text, lang)
 
 
+def backend_label(path: str) -> str:
+    """Return the TTS backend that produced *path*, inferred from its extension.
+
+    VOICEVOX writes .wav; the gTTS fallback writes .mp3.
+    """
+    return "VOICEVOX" if str(path).lower().endswith(".wav") else "gTTS"
+
+
 def voicevox_available(url: str) -> bool:
     """Return True if the VOICEVOX engine is reachable at the given URL."""
     try:

@@ -57,7 +57,7 @@ def add(
 ):
     """Look up a word, generate audio + example sentence, and add to Anki."""
     from kado.anki import AnkiConnect, AnkiConnectError
-    from kado.audio import generate_audio
+    from kado.audio import backend_label, generate_audio
     from kado.dictionary import lookup
     from kado.sentences import generate_example, resolve_model_name
 
@@ -126,7 +126,7 @@ def add(
 
     # 4. Audio
     if not no_audio and cfg.audio_enabled:
-        with Console().status("[bold]🔊 Generating audio (gTTS)...[/bold]"):
+        with Console().status("[bold]🔊 Generating audio...[/bold]"):
             try:
                 card.audio_path = generate_audio(card.word, lang=cfg.audio_lang, voicevox_url=cfg.voicevox_url, voicevox_speaker=cfg.voicevox_speaker)
             except Exception as e:
@@ -138,7 +138,7 @@ def add(
                 except Exception:
                     pass
         if card.audio_path:
-            rprint("   [green]✓[/green] Audio saved [dim](gTTS)[/dim]")
+            rprint(f"   [green]✓[/green] Audio saved [dim]({backend_label(card.audio_path)})[/dim]")
 
     # 5. Preview
     _print_card_preview(card)

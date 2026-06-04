@@ -262,7 +262,8 @@ def test_merge_sources_vision_wins_over_llm():
     vision = [VocabCard(word="東京", reading="とうきょう", meaning="Tokyo (vision)", source="vision")]
     llm = [VocabCard(word="東京", reading="とうきょう", meaning="Tokyo (llm)", source="llm")]
 
-    with patch("kado.pdf_import._llm_fix_ocr_cards", side_effect=lambda cards, **kw: cards):
+    with patch("kado.pdf_import._llm_fix_ocr_cards", side_effect=lambda cards, **kw: cards), \
+         patch("kado.pdf_import._llm_translate_vision_cards", side_effect=lambda cards, **kw: cards):
         merged = _merge_sources(ocr_cards=[], llm_cards=llm, vision_cards=vision)
 
     assert len(merged) == 1

@@ -1,3 +1,43 @@
+UNAME_S := $(shell uname -s)
+OLLAMA_TEXT_MODEL ?= qwen2.5:7b
+OLLAMA_VISION_MODEL ?= llava:7b
+
+.PHONY: setup-local start stop local-start local-stop
+
+# One-shot local setup: Python deps, OCR tooling, Ollama models, and TTS engine.
+# Idempotent — safe to re-run. Targets a Linux host (Docker runs as a daemon).
+setup-local:
+	@echo "→ [1/5] Installing Python dependencies (uv sync)..."
+	@uv sync
+	@echo "→ [2/5] Checking poppler (PDF → image for scanned imports)..."
+	@command -v pdftoppm > /dev/null \
+		&& echo "  poppler already installed" \
+		|| (echo "  installing poppler-utils (sudo)..."; sudo apt-get update -qq && sudo apt-get install -y poppler-utils)
+	@echo "→ [3/5] Checking tesseract OCR + jpn/deu/eng language packs..."
+	@command -v tesseract > /dev/null \
+		&& echo "  tesseract installed (langs: $$(tesseract --list-langs 2>&1 | tail -n +2 | tr '\n' ' '))" \
+		|| (echo "  installing tesseract + language packs (sudo)..."; sudo apt-get install -y tesseract-ocr tesseract-ocr-jpn tesseract-ocr-deu tesseract-ocr-eng)
+	@echo "→ [4/5] Ensuring Ollama is running and pulling models..."
+	@curl -sf localhost:11434/api/tags > /dev/null 2>&1 \
+		&& echo "  Ollama already running" \
+		|| (echo "  starting ollama serve..."; ollama serve > /dev/null 2>&1 & until curl -sf localhost:11434/api/tags > /dev/null 2>&1; do sleep 1; done)
+	@ollama list | grep -q "$(OLLAMA_TEXT_MODEL)" \
+		&& echo "  text model $(OLLAMA_TEXT_MODEL) already present" \
+		|| (echo "  pulling text model $(OLLAMA_TEXT_MODEL) (~4.7GB)..."; ollama pull $(OLLAMA_TEXT_MODEL))
+	@ollama list | grep -q "$(OLLAMA_VISION_MODEL)" \
+		&& echo "  vision model $(OLLAMA_VISION_MODEL) already present" \
+		|| (echo "  pulling vision model $(OLLAMA_VISION_MODEL) (~4.7GB)..."; ollama pull $(OLLAMA_VISION_MODEL))
+	@echo "→ [5/5] Starting local VOICEVOX (docker, :50021)..."
+	@docker info > /dev/null 2>&1 || (echo "  ✗ Docker is not running — start Docker and re-run 'make setup-local'"; exit 1)
+	@docker ps --filter "publish=50021" --filter "status=running" --quiet | grep -q . \
+		&& echo "  VOICEVOX already running" \
+		|| docker run -d --rm -p 50021:50021 voicevox/voicevox_engine:cpu-latest > /dev/null
+	@echo "  Pointing kado config at local VOICEVOX (only if not already set)..."
+	@uv run python -c "from kado.config import KadoConfig; c = KadoConfig.load(); c.voicevox_url = c.voicevox_url or 'http://localhost:50021'; c.save(); print('  voicevox_url = ' + c.voicevox_url)"
+	@echo "✓ Local setup complete."
+	@echo "  Next: run 'uv run kado config' to pick your Anki deck."
+	@echo "  Verify services with 'uv run kado status'."
+
 start:
 	@echo "→ Opening SSH tunnel to cluster Ollama (localhost:11435 → omarchyd:11434)..."
 	@pgrep -f "ssh -N -L 11435" > /dev/null \
@@ -24,14 +64,19 @@ stop:
 	@echo "✓ All services stopped."
 
 local-start:
-	@echo "→ Starting Docker Desktop..."
-	@open -a Docker
+	@echo "→ Ensuring Docker is running..."
+ifeq ($(UNAME_S),Darwin)
+	@docker info > /dev/null 2>&1 || open -a Docker
 	@echo "→ Waiting for Docker to be ready..."
 	@until docker info > /dev/null 2>&1; do sleep 1; done
+else
+	@docker info > /dev/null 2>&1 \
+		|| (echo "  ✗ Docker daemon not running — start it (e.g. 'sudo systemctl start docker' or Docker Desktop) and re-run"; exit 1)
+endif
 	@echo "→ Starting VOICEVOX locally..."
 	@docker ps --filter "publish=50021" --filter "status=running" --quiet | grep -q . \
 		&& echo "  VOICEVOX already running" \
-		|| docker run -d --rm -p 50021:50021 voicevox/voicevox_engine:cpu-latest
+		|| docker run -d --rm -p 50021:50021 voicevox/voicevox_engine:cpu-latest > /dev/null
 	@echo "✓ Local services started."
 
 local-stop:
@@ -39,6 +84,8 @@ local-stop:
 	@docker ps --filter "publish=50021" --filter "status=running" --quiet | grep -q . \
 		&& docker stop $$(docker ps --filter "publish=50021" --quiet) && echo "  VOICEVOX stopped" \
 		|| echo "  VOICEVOX not running"
+ifeq ($(UNAME_S),Darwin)
 	@echo "→ Quitting Docker Desktop..."
 	@osascript -e 'quit app "Docker Desktop"' 2>/dev/null && echo "  Docker Desktop quit" || echo "  Docker Desktop not running"
+endif
 	@echo "✓ Local services stopped."
