@@ -27,6 +27,8 @@ setup-local:
 	@ollama list | grep -q "$(OLLAMA_VISION_MODEL)" \
 		&& echo "  vision model $(OLLAMA_VISION_MODEL) already present" \
 		|| (echo "  pulling vision model $(OLLAMA_VISION_MODEL) (~4.7GB)..."; ollama pull $(OLLAMA_VISION_MODEL))
+	@echo "  Pointing kado config at local Ollama (localhost:11434)..."
+	@uv run python -c "from kado.config import KadoConfig; c = KadoConfig.load(); c.ollama_url = 'http://localhost:11434'; c.save(); print('  ollama_url = ' + c.ollama_url)"
 	@echo "→ [5/5] Starting local VOICEVOX (docker, :50021)..."
 	@docker info > /dev/null 2>&1 || (echo "  ✗ Docker is not running — start Docker and re-run 'make setup-local'"; exit 1)
 	@docker ps --filter "publish=50021" --filter "status=running" --quiet | grep -q . \
@@ -42,7 +44,9 @@ start:
 	@echo "→ Opening SSH tunnel to cluster Ollama (localhost:11435 → omarchyd:11434)..."
 	@pgrep -f "ssh -N -L 11435" > /dev/null \
 		&& echo "  Ollama tunnel already active" \
-		|| (ssh -N -L 11435:localhost:11434 kristian@omarchyd &)
+		|| (ssh -N -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes -L 11435:localhost:11434 kristian@omarchyd &)
+	@echo "  Pointing kado config at the tunnel (localhost:11435)..."
+	@uv run python -c "from kado.config import KadoConfig; c = KadoConfig.load(); c.ollama_url = 'http://localhost:11435'; c.save(); print('  ollama_url = ' + c.ollama_url)"
 	@echo "→ Starting VOICEVOX on cluster (omarchyd:50021)..."
 	@ssh kristian@omarchyd "docker ps --filter 'publish=50021' --filter 'status=running' --quiet | grep -q . \
 		&& echo '  VOICEVOX already running' \
