@@ -1,4 +1,12 @@
 UNAME_S := $(shell uname -s)
+# Container CLI. Override with `make CONTAINER=nerdctl local-start`.
+CONTAINER ?= docker
+# Prefer Rancher Desktop's moby context when present — avoids the login-gated
+# Docker Desktop daemon. Empty otherwise (docker uses its active context).
+DOCKER_CONTEXT ?= $(shell docker context ls --format '{{.Name}}' 2>/dev/null | grep -qx rancher-desktop && echo rancher-desktop)
+export DOCKER_CONTEXT
+# macOS GUI app backing the runtime (auto-opened by local-start).
+RUNTIME_APP ?= $(if $(DOCKER_CONTEXT),Rancher Desktop,Docker)
 OLLAMA_TEXT_MODEL ?= qwen2.5:7b
 OLLAMA_VISION_MODEL ?= llava:7b
 
@@ -68,28 +76,24 @@ stop:
 	@echo "✓ All services stopped."
 
 local-start:
-	@echo "→ Ensuring Docker is running..."
+	@echo "→ Ensuring container runtime ($(CONTAINER)) is running..."
 ifeq ($(UNAME_S),Darwin)
-	@docker info > /dev/null 2>&1 || open -a Docker
-	@echo "→ Waiting for Docker to be ready..."
-	@until docker info > /dev/null 2>&1; do sleep 1; done
+	@$(CONTAINER) info > /dev/null 2>&1 || open -a "$(RUNTIME_APP)"
+	@echo "→ Waiting for $(CONTAINER) to be ready..."
+	@until $(CONTAINER) info > /dev/null 2>&1; do sleep 2; done
 else
-	@docker info > /dev/null 2>&1 \
-		|| (echo "  ✗ Docker daemon not running — start it (e.g. 'sudo systemctl start docker' or Docker Desktop) and re-run"; exit 1)
+	@$(CONTAINER) info > /dev/null 2>&1 \
+		|| (echo "  ✗ $(CONTAINER) daemon not running — start your runtime and re-run"; exit 1)
 endif
 	@echo "→ Starting VOICEVOX locally..."
-	@docker ps --filter "publish=50021" --filter "status=running" --quiet | grep -q . \
+	@$(CONTAINER) ps --filter "publish=50021" --filter "status=running" --quiet | grep -q . \
 		&& echo "  VOICEVOX already running" \
-		|| docker run -d --rm -p 50021:50021 voicevox/voicevox_engine:cpu-latest > /dev/null
+		|| $(CONTAINER) run -d --rm -p 50021:50021 voicevox/voicevox_engine:cpu-latest > /dev/null
 	@echo "✓ Local services started."
 
 local-stop:
 	@echo "→ Stopping local VOICEVOX..."
-	@docker ps --filter "publish=50021" --filter "status=running" --quiet | grep -q . \
-		&& docker stop $$(docker ps --filter "publish=50021" --quiet) && echo "  VOICEVOX stopped" \
+	@$(CONTAINER) ps --filter "publish=50021" --filter "status=running" --quiet | grep -q . \
+		&& $(CONTAINER) stop $$($(CONTAINER) ps --filter "publish=50021" --quiet) && echo "  VOICEVOX stopped" \
 		|| echo "  VOICEVOX not running"
-ifeq ($(UNAME_S),Darwin)
-	@echo "→ Quitting Docker Desktop..."
-	@osascript -e 'quit app "Docker Desktop"' 2>/dev/null && echo "  Docker Desktop quit" || echo "  Docker Desktop not running"
-endif
 	@echo "✓ Local services stopped."
