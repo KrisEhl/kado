@@ -280,7 +280,75 @@ def _merge_sources(
             merged_words.add(card.word)
             merged.append(card)
 
+    # Final pass: regenerate readings from the (now-corrected) kanji. Vision/OCR
+    # readings are frequently garbled (宿泊→しゅている, 矛盾→むむじゅん) even when the
+    # kanji survived intact, so we ignore the extracted reading and ask the text
+    # model for the canonical 読み方 of each word.
+    merged = _llm_correct_readings(
+        merged, provider=provider, ollama_url=ollama_url, ollama_model=ollama_model
+    )
+
     return merged
+
+
+def _llm_correct_readings(
+    cards: list[VocabCard],
+    provider: str = "ollama",
+    ollama_url: str = "",
+    ollama_model: str = "",
+) -> list[VocabCard]:
+    """Regenerate the hiragana reading for each kanji-bearing card from its word.
+
+    The extracted reading (from vision or OCR) is treated as untrustworthy and
+    discarded — the model derives the standard reading from the word itself. The
+    word is never modified, and pure-kana words are left untouched.
+    """
+    # Only words containing kanji can have a mis-OCR'd reading worth fixing.
+    fixable = [(i, c) for i, c in enumerate(cards) if c.word and not _is_all_kana(c.word)]
+    if not fixable:
+        return cards
+
+    entries = [{"id": i, "word": c.word} for i, c in fixable]
+    batch_json = json.dumps(entries, ensure_ascii=False)
+
+    prompt = (
+        "Give the standard hiragana reading (読み方) for each Japanese vocabulary word.\n"
+        "- Output the reading in hiragana only.\n"
+        "- If the word ends in (する) or (な), include する / な in the reading "
+        "(e.g. 観光(する) → かんこうする).\n"
+        "- Match okurigana exactly (e.g. 見送る → みおくる).\n"
+        "- Ignore any reading you may have seen elsewhere; derive it from the word.\n\n"
+        f"Words: {batch_json}\n\n"
+        "Return ONLY a JSON array, no markdown:\n"
+        '[{"id": 0, "reading": "かんこうする"}, ...]'
+    )
+
+    text = _llm_chat(
+        prompt, provider=provider, ollama_url=ollama_url, ollama_model=ollama_model
+    )
+    if not text:
+        return cards
+
+    try:
+        match = re.search(r"\[.*\]", text, re.DOTALL)
+        if not match:
+            return cards
+        data = json.loads(match.group())
+    except (json.JSONDecodeError, KeyError):
+        return cards
+
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        idx = entry.get("id", -1)
+        if not isinstance(idx, int) or not (0 <= idx < len(cards)):
+            continue
+        reading = _clean_reading(str(entry.get("reading", "")).strip())
+        # Only accept a pure-kana reading; reject empties or anything with kanji.
+        if reading and _is_all_kana(reading):
+            cards[idx].reading = reading
+
+    return cards
 
 
 def _llm_fix_ocr_cards(
@@ -751,10 +819,16 @@ def _try_ollama_vision(
                     ],
                     "stream": False,
                     "keep_alive": "30m",
+                    # Thinking VL models (qwen3-vl) ignore think:False — they always
+                    # emit a long <thinking> stream before the answer. On a dense page
+                    # that reasoning can exceed any fixed output cap, starving the JSON
+                    # answer and returning empty content. num_predict:-1 = no output
+                    # cap (bounded only by num_ctx), so the model can always reach the
+                    # answer. num_ctx is large enough for vision tokens + long output.
                     "think": False,
                     "options": {
-                        "num_ctx": 8192,
-                        "num_predict": 2048,
+                        "num_ctx": 32768,
+                        "num_predict": -1,
                         "temperature": 0.1,
                     },
                 }
@@ -845,6 +919,9 @@ _CLEANUP_MODELS = [
 
 # Ollama models to try (local), largest first. Override with KADO_OLLAMA_MODEL env var.
 _OLLAMA_MODELS = [
+    "qwen3:32b",
+    "qwen3:14b",
+    "qwen3:8b",
     "qwen2.5:32b",
     "qwen2.5:14b",
     "qwen2.5:7b",
@@ -945,7 +1022,7 @@ def _warn_ollama_missing(*, ollama_url: str = "", ollama_model: str = "") -> Non
         return
 
     installed = sorted(available)
-    recommended = "qwen2.5:7b"
+    recommended = "qwen3:8b"
     print(
         f"   No compatible Ollama model found.\n"
         f"   Installed: {', '.join(installed) if installed else '(none)'}\n"

@@ -11,6 +11,9 @@ from kado.ollama_utils import OLLAMA_URL, ollama_available_models, ollama_resolv
 
 OLLAMA_MODELS = [
     "qwen3.5:27b-q8_0",
+    "qwen3:32b",
+    "qwen3:14b",
+    "qwen3:8b",
     "qwen2.5:32b",
     "qwen2.5:14b",
     "qwen2.5:7b",

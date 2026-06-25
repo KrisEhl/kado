@@ -7,13 +7,19 @@ DOCKER_CONTEXT ?= $(shell docker context ls --format '{{.Name}}' 2>/dev/null | g
 export DOCKER_CONTEXT
 # macOS GUI app backing the runtime (auto-opened by local-start).
 RUNTIME_APP ?= $(if $(DOCKER_CONTEXT),Rancher Desktop,Docker)
-OLLAMA_TEXT_MODEL ?= qwen2.5:7b
-OLLAMA_VISION_MODEL ?= llava:7b
+OLLAMA_TEXT_MODEL ?= qwen3:32b
+OLLAMA_VISION_MODEL ?= qwen2.5vl:7b
 
 .PHONY: setup-local start stop local-start local-stop
 
 # One-shot local setup: Python deps, OCR tooling, Ollama models, and TTS engine.
 # Idempotent — safe to re-run. Targets a Linux host (Docker runs as a daemon).
+#
+# Container runtime: defaults to `docker`. If you use Rancher Desktop instead of
+# Docker Desktop, override the CLI with `make CONTAINER=nerdctl setup-local`
+# (nerdctl ships with Rancher Desktop at ~/.rd/bin/nerdctl). Rancher Desktop also
+# provides a drop-in `docker` shim, so plain `make setup-local` works too once the
+# app is running.
 setup-local:
 	@echo "→ [1/5] Installing Python dependencies (uv sync)..."
 	@uv sync
@@ -31,17 +37,17 @@ setup-local:
 		|| (echo "  starting ollama serve..."; ollama serve > /dev/null 2>&1 & until curl -sf localhost:11434/api/tags > /dev/null 2>&1; do sleep 1; done)
 	@ollama list | grep -q "$(OLLAMA_TEXT_MODEL)" \
 		&& echo "  text model $(OLLAMA_TEXT_MODEL) already present" \
-		|| (echo "  pulling text model $(OLLAMA_TEXT_MODEL) (~4.7GB)..."; ollama pull $(OLLAMA_TEXT_MODEL))
+		|| (echo "  pulling text model $(OLLAMA_TEXT_MODEL) (~20GB)..."; ollama pull $(OLLAMA_TEXT_MODEL))
 	@ollama list | grep -q "$(OLLAMA_VISION_MODEL)" \
 		&& echo "  vision model $(OLLAMA_VISION_MODEL) already present" \
-		|| (echo "  pulling vision model $(OLLAMA_VISION_MODEL) (~4.7GB)..."; ollama pull $(OLLAMA_VISION_MODEL))
+		|| (echo "  pulling vision model $(OLLAMA_VISION_MODEL) (~6GB)..."; ollama pull $(OLLAMA_VISION_MODEL))
 	@echo "  Pointing kado config at local Ollama (localhost:11434)..."
 	@uv run python -c "from kado.config import KadoConfig; c = KadoConfig.load(); c.ollama_url = 'http://localhost:11434'; c.save(); print('  ollama_url = ' + c.ollama_url)"
-	@echo "→ [5/5] Starting local VOICEVOX (docker, :50021)..."
-	@docker info > /dev/null 2>&1 || (echo "  ✗ Docker is not running — start Docker and re-run 'make setup-local'"; exit 1)
-	@docker ps --filter "publish=50021" --filter "status=running" --quiet | grep -q . \
+	@echo "→ [5/5] Starting local VOICEVOX ($(CONTAINER), :50021)..."
+	@$(CONTAINER) info > /dev/null 2>&1 || (echo "  ✗ $(CONTAINER) is not running — start your container runtime and re-run 'make setup-local'"; exit 1)
+	@$(CONTAINER) ps --filter "publish=50021" --filter "status=running" --quiet | grep -q . \
 		&& echo "  VOICEVOX already running" \
-		|| docker run -d --rm -p 50021:50021 voicevox/voicevox_engine:cpu-latest > /dev/null
+		|| $(CONTAINER) run -d --rm -p 50021:50021 voicevox/voicevox_engine:cpu-latest > /dev/null
 	@echo "  Pointing kado config at local VOICEVOX (only if not already set)..."
 	@uv run python -c "from kado.config import KadoConfig; c = KadoConfig.load(); c.voicevox_url = c.voicevox_url or 'http://localhost:50021'; c.save(); print('  voicevox_url = ' + c.voicevox_url)"
 	@echo "✓ Local setup complete."

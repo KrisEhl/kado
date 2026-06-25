@@ -31,6 +31,9 @@ HF_MODELS = [
 
 # Ollama models to try, largest first. Override with KADO_OLLAMA_MODEL env var.
 OLLAMA_MODELS = [
+    "qwen3:32b",
+    "qwen3:14b",
+    "qwen3:8b",
     "qwen2.5:32b",
     "qwen2.5:14b",
     "qwen2.5:7b",

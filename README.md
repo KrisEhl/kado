@@ -55,15 +55,15 @@ Run LLMs locally for OCR cleanup, vocab reconstruction, and translation. This is
 ```bash
 # Install Ollama: https://ollama.com
 # Then pull a model:
-ollama pull qwen2.5:7b          # text model (~4.7GB) — OCR cleanup & reconstruction
-ollama pull llava:7b             # vision model (optional) — reads page images directly
+ollama pull qwen3:8b            # text model (~5.2GB) — OCR cleanup & reconstruction
+ollama pull qwen2.5vl:7b         # vision model (optional, ~6GB) — reads page images directly
 ```
 
 Kado auto-detects Ollama on `localhost:11434`. Override with env vars if needed:
 
 ```bash
-KADO_OLLAMA_MODEL=qwen2.5:7b          # force a specific text model
-KADO_OLLAMA_VISION_MODEL=llava:13b     # force a specific vision model
+KADO_OLLAMA_MODEL=qwen3:8b            # force a specific text model
+KADO_OLLAMA_VISION_MODEL=qwen2.5vl:7b  # force a specific vision model
 KADO_OLLAMA_URL=http://localhost:11434  # custom Ollama URL
 ```
 

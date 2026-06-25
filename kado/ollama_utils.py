@@ -11,17 +11,22 @@ OLLAMA_URL = "http://localhost:11434"
 
 # Vision models tried in order of preference when auto-selecting.
 # Override with KADO_OLLAMA_VISION_MODEL env var to pin a specific model.
+# Preference order favours NON-THINKING OCR models. OCR is pure transcription —
+# there is nothing to reason about — so a "thinking" VL model (qwen3-vl) just
+# burns thousands of tokens reasoning before the answer, which is slow and can
+# return empty content when the reasoning exhausts the output budget. qwen2.5vl
+# is instruct-tuned (no thinking) and is the reliable default for Japanese tables.
 OLLAMA_VISION_MODELS = [
-    "qwen3-vl:8b",          # ~11GB Q4, 32-lang OCR, 256K ctx
+    "qwen2.5vl:32b",        # best accuracy, non-thinking (~21GB Q4)
+    "qwen2.5vl:7b",         # fast, non-thinking, reliable (~6GB)
+    "qwen2.5vl:72b",        # non-thinking, heaviest
     "glm-ocr",              # ~2-4GB, #1 OmniDocBench, Japanese support
     "deepseek-ocr:3b",      # ~6-8GB, 100+ langs, confirmed Japanese
-    "qwen2.5vl:72b",
-    "qwen2.5vl:7b",         # good OCR but VRAM-heavy in Ollama (~15GB at Q4)
     "minicpm-v",
     "llama3.2-vision:11b",
-    "llava:34b",
-    "llava:13b",
-    "llava:7b",
+    "qwen3-vl:8b",          # thinking model — works (num_predict:-1) but slow; last resort
+    # llava intentionally excluded: it can't reliably read Japanese kanji tables
+    # and hallucinates plausible-but-wrong vocabulary instead of transcribing.
 ]
 
 

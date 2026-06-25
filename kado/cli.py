@@ -634,7 +634,7 @@ def models():
         raise typer.Exit(1)
 
     if not available:
-        rprint("[yellow]⚠[/yellow] No models installed. Run: ollama pull qwen2.5:7b")
+        rprint("[yellow]⚠[/yellow] No models installed. Run: ollama pull qwen3:8b")
         raise typer.Exit(1)
 
     sorted_models = sorted(available)
